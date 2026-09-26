@@ -205,9 +205,7 @@ void device_unblock_probing(void)
 /* qkx: explicit diagnostic kick enables slow per-probe tracing. */
 bool qkx_probe_trace;
 /* Devices known to be unsafe or blocking when inherited across kexec. */
-static char *qkx_probe_skip =
-	"c440000.qcom,spmi:qcom,pm8150b@2:qcom,qpnp-smb5|"
-	"ac4d000.qcom,cpas-cdm0";
+static char *qkx_probe_skip = "";
 /* Writable so a parked device can be released after USB logging is up. */
 core_param(qkx_probe_skip, qkx_probe_skip, charp, 0644);
 
