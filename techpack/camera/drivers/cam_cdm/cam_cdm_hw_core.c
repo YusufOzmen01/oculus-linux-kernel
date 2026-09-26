@@ -28,6 +28,17 @@
 
 #define CAM_CDM_BL_FIFO_WAIT_TIMEOUT 2000
 
+static int qkx_cpas_probe_stop = -1;
+core_param(qkx_cpas_probe_stop, qkx_cpas_probe_stop, int, 0444);
+
+#define QKX_CPAS_STOP(_stage, _pdev) do { \
+	if (qkx_cpas_probe_stop == (_stage)) { \
+		pr_emerg("qkxcpas: %s diagnostic stop stage %d\n", \
+			 dev_name(&(_pdev)->dev), (_stage)); \
+		return -ECANCELED; \
+	} \
+} while (0)
+
 static void cam_hw_cdm_work(struct work_struct *work);
 
 /* DT match table entry for all CDM variants*/
@@ -913,7 +924,17 @@ int cam_hw_cdm_deinit(void *hw_priv,
 	soc_info = &cdm_hw->soc_info;
 	cdm_core = cdm_hw->core_info;
 	atomic_set(&cdm_core->work_record, 0);
+	if (qkx_cpas_probe_stop == 80) {
+		pr_emerg("qkxcpas: deinit diagnostic stop before disable_platform_resource\n");
+		return -ECANCELED;
+	}
+	pr_emerg("qkxcpas: deinit before disable_platform_resource\n");
 	rc = cam_soc_util_disable_platform_resource(soc_info, true, true);
+	pr_emerg("qkxcpas: deinit disable_platform_resource ret=%d\n", rc);
+	if (qkx_cpas_probe_stop == 81) {
+		pr_emerg("qkxcpas: deinit diagnostic stop after disable_platform_resource\n");
+		return -ECANCELED;
+	}
 	if (rc) {
 		CAM_ERR(CAM_CDM, "disable platform failed");
 	} else {
@@ -927,6 +948,8 @@ int cam_hw_cdm_deinit(void *hw_priv,
 int cam_hw_cdm_probe(struct platform_device *pdev)
 {
 	int rc;
+
+	QKX_CPAS_STOP(0, pdev);
 	struct cam_hw_info *cdm_hw = NULL;
 	struct cam_hw_intf *cdm_hw_intf = NULL;
 	struct cam_cdm *cdm_core = NULL;
@@ -967,6 +990,7 @@ int cam_hw_cdm_probe(struct platform_device *pdev)
 		CAM_ERR(CAM_CDM, "Failed to get dt properties");
 		goto release_mem;
 	}
+	QKX_CPAS_STOP(1, pdev);
 	cdm_hw_intf->hw_idx = cdm_hw->soc_info.index;
 	cdm_core = (struct cam_cdm *)cdm_hw->core_info;
 	soc_private = (struct cam_cdm_private_dt_data *)
@@ -1003,11 +1027,15 @@ int cam_hw_cdm_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, cdm_hw_intf);
 
+	pr_emerg("qkxcpas: %s before cam_smmu_get_handle\n", dev_name(&pdev->dev));
 	rc = cam_smmu_get_handle("cpas-cdm0", &cdm_core->iommu_hdl.non_secure);
+	pr_emerg("qkxcpas: %s cam_smmu_get_handle ret=%d handle=%d\n",
+		 dev_name(&pdev->dev), rc, cdm_core->iommu_hdl.non_secure);
 	if (rc < 0) {
 		CAM_ERR(CAM_CDM, "cpas-cdm get iommu handle failed");
 		goto unlock_release_mem;
 	}
+	QKX_CPAS_STOP(2, pdev);
 	cam_smmu_set_client_page_fault_handler(cdm_core->iommu_hdl.non_secure,
 		cam_hw_cdm_iommu_fault_handler, cdm_hw);
 
@@ -1017,19 +1045,28 @@ int cam_hw_cdm_probe(struct platform_device *pdev)
 		WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS,
 		CAM_CDM_INFLIGHT_WORKS);
 
+	pr_emerg("qkxcpas: %s before request_platform_resource\n",
+		 dev_name(&pdev->dev));
 	rc = cam_soc_util_request_platform_resource(&cdm_hw->soc_info,
 			cam_hw_cdm_irq, cdm_hw);
+	pr_emerg("qkxcpas: %s request_platform_resource ret=%d\n",
+		 dev_name(&pdev->dev), rc);
 	if (rc) {
 		CAM_ERR(CAM_CDM, "Failed to request platform resource");
 		goto destroy_non_secure_hdl;
 	}
+	QKX_CPAS_STOP(3, pdev);
 
 	cpas_parms.cam_cpas_client_cb = cam_cdm_cpas_cb;
 	cpas_parms.cell_index = cdm_hw->soc_info.index;
 	cpas_parms.dev = &pdev->dev;
 	cpas_parms.userdata = cdm_hw_intf;
 	strlcpy(cpas_parms.identifier, "cpas-cdm", CAM_HW_IDENTIFIER_LENGTH);
+	pr_emerg("qkxcpas: %s before cam_cpas_register_client\n",
+		 dev_name(&pdev->dev));
 	rc = cam_cpas_register_client(&cpas_parms);
+	pr_emerg("qkxcpas: %s cam_cpas_register_client ret=%d\n",
+		 dev_name(&pdev->dev), rc);
 	if (rc) {
 		CAM_ERR(CAM_CDM, "Virtual CDM CPAS registration failed");
 		goto release_platform_resource;
@@ -1037,6 +1074,7 @@ int cam_hw_cdm_probe(struct platform_device *pdev)
 	CAM_DBG(CAM_CDM, "CPAS registration successful handle=%d",
 		cpas_parms.client_handle);
 	cdm_core->cpas_handle = cpas_parms.client_handle;
+	QKX_CPAS_STOP(4, pdev);
 
 	axi_vote = kzalloc(sizeof(struct cam_axi_vote), GFP_KERNEL);
 	if (!axi_vote) {
@@ -1053,19 +1091,27 @@ int cam_hw_cdm_probe(struct platform_device *pdev)
 	axi_vote->axi_path[0].mnoc_ab_bw = CAM_CPAS_DEFAULT_AXI_BW;
 	axi_vote->axi_path[0].mnoc_ib_bw = CAM_CPAS_DEFAULT_AXI_BW;
 
+	pr_emerg("qkxcpas: %s before cam_cpas_start\n", dev_name(&pdev->dev));
 	rc = cam_cpas_start(cdm_core->cpas_handle, &ahb_vote, axi_vote);
+	pr_emerg("qkxcpas: %s cam_cpas_start ret=%d\n",
+		 dev_name(&pdev->dev), rc);
 	kfree(axi_vote);
 	if (rc) {
 		CAM_ERR(CAM_CDM, "CPAS start failed");
 		goto cpas_unregister;
 	}
+	QKX_CPAS_STOP(5, pdev);
 
+	pr_emerg("qkxcpas: %s before cam_hw_cdm_init\n", dev_name(&pdev->dev));
 	rc = cam_hw_cdm_init(cdm_hw, NULL, 0);
+	pr_emerg("qkxcpas: %s cam_hw_cdm_init ret=%d\n",
+		 dev_name(&pdev->dev), rc);
 	if (rc) {
 		CAM_ERR(CAM_CDM, "Failed to Init CDM HW");
 		goto cpas_stop;
 	}
 	cdm_hw->open_count++;
+	QKX_CPAS_STOP(6, pdev);
 
 	if (cam_cdm_read_hw_reg(cdm_hw, CDM_CFG_HW_VERSION,
 		&cdm_core->hw_version)) {
@@ -1079,6 +1125,7 @@ int cam_hw_cdm_probe(struct platform_device *pdev)
 		goto deinit;
 	}
 
+	QKX_CPAS_STOP(7, pdev);
 	CAM_DBG(CAM_CDM, "CDM Hw version read success family =%x hw =%x",
 		cdm_core->hw_family_version, cdm_core->hw_version);
 	cdm_core->ops = cam_cdm_get_ops(cdm_core->hw_version, NULL,
@@ -1100,6 +1147,7 @@ int cam_hw_cdm_probe(struct platform_device *pdev)
 		cdm_hw->open_count--;
 		goto cpas_stop;
 	}
+	QKX_CPAS_STOP(8, pdev);
 
 	rc = cam_cpas_stop(cdm_core->cpas_handle);
 	if (rc) {
@@ -1107,6 +1155,7 @@ int cam_hw_cdm_probe(struct platform_device *pdev)
 		cdm_hw->open_count--;
 		goto cpas_unregister;
 	}
+	QKX_CPAS_STOP(9, pdev);
 
 	rc = cam_cdm_intf_register_hw_cdm(cdm_hw_intf,
 		soc_private, CAM_HW_CDM, &cdm_core->index);
@@ -1115,6 +1164,7 @@ int cam_hw_cdm_probe(struct platform_device *pdev)
 		cdm_hw->open_count--;
 		goto cpas_unregister;
 	}
+	QKX_CPAS_STOP(10, pdev);
 	cdm_hw->open_count--;
 	mutex_unlock(&cdm_hw->hw_mutex);
 

@@ -824,6 +824,9 @@ static int cam_smmu_create_add_handle_in_table(char *name,
 
 	/* create handle and add in the iommu hardware table */
 	for (i = 0; i < iommu_cb_set.cb_num; i++) {
+		/* Context-bank probes can be incomplete while dependencies defer. */
+		if (!iommu_cb_set.cb_info[i].name)
+			continue;
 		if (!strcmp(iommu_cb_set.cb_info[i].name, name)) {
 			mutex_lock(&iommu_cb_set.cb_info[i].lock);
 			if (iommu_cb_set.cb_info[i].handle != HANDLE_INIT) {

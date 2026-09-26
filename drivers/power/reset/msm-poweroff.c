@@ -56,6 +56,8 @@ static bool scm_deassert_ps_hold_supported;
 static void __iomem *msm_ps_hold;
 static phys_addr_t tcsr_boot_misc_detect;
 static void scm_disable_sdi(void);
+static void halt_spmi_pmic_arbiter(void);
+static void deassert_ps_hold(void);
 
 /*
  * Runtime could be only changed value once.
@@ -72,7 +74,32 @@ static bool dload_mode_enabled;
 static void *emergency_dload_mode_addr;
 static bool scm_dload_supported;
 
+/* Quest kexec diagnostics retain the reserved RAM log across checkpoints. */
 static bool force_warm_reboot;
+
+void qkx_force_warm_reboot(void)
+{
+	force_warm_reboot = true;
+}
+
+/*
+ * Minimal, lock-free warm reset path.  Safe to invoke from a secondary
+ * CPU while the boot CPU is hung inside an initcall with interrupts
+ * disabled: it touches no notifier lists, no device locks, and performs
+ * no cross-CPU synchronization.  The PS_HOLD drop is a direct register
+ * write so the reset cannot be lost inside a wedged SCM call.
+ */
+void qkx_minimal_warm_reset(void)
+{
+	qpnp_pon_system_pwr_off(PON_POWER_OFF_WARM_RESET);
+	flush_cache_all();
+	scm_disable_sdi();
+	if (msm_ps_hold)
+		__raw_writel(0, msm_ps_hold);
+	for (;;)
+		mdelay(1000);
+}
+EXPORT_SYMBOL(qkx_minimal_warm_reset);
 
 /* interface for exporting attributes */
 struct reset_attribute {

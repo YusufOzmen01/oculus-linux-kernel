@@ -1551,8 +1551,9 @@ static int sde_rsc_probe(struct platform_device *pdev)
 
 	rsc->fs = devm_regulator_get(&pdev->dev, "vdd");
 	if (IS_ERR_OR_NULL(rsc->fs)) {
+		ret = !rsc->fs ? -ENODEV : PTR_ERR(rsc->fs);
 		rsc->fs = NULL;
-		pr_err("unable to get regulator\n");
+		pr_err("unable to get regulator, ret=%d\n", ret);
 		goto sde_rsc_fail;
 	}
 

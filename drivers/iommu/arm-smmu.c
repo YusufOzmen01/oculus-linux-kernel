@@ -5607,8 +5607,16 @@ static int arm_smmu_init_bus_scaling(struct arm_smmu_power_resources *pwr)
 
 	pwr->bus_client = msm_bus_scale_register_client(pwr->bus_dt_data);
 	if (!pwr->bus_client) {
-		dev_err(dev, "Bus client registration failed\n");
-		return -EPROBE_DEFER;
+		/*
+		 * qkx: after kexec the msm_bus fabric driver may never come up
+		 * (deferred retries are disabled in this diagnostic kernel), which
+		 * would leave apps-smmu permanently dead and every SMMU client
+		 * (e.g. dwc3 USB) running against stale translation. Bus voting is
+		 * an optimization; continue without it.
+		 */
+		dev_warn(dev,
+			 "qkx: bus client registration failed; continuing without bus scaling\n");
+		return 0;
 	}
 
 	return 0;

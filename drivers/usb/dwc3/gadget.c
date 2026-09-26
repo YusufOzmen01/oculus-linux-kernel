@@ -22,6 +22,7 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb/composite.h>
 #include <linux/usb/gadget.h>
+#include <linux/pm_runtime.h>
 
 #include "debug.h"
 #include "core.h"
@@ -2493,12 +2494,18 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 		 * the udc_start.
 		 */
 		spin_unlock_irqrestore(&dwc->lock, flags);
+		dev_info(dwc->dev,
+			 "qkx: pullup(%d) deferred: vbus_active=%d driver=%d err=%d\n",
+			 is_on, dwc->vbus_active, !!dwc->gadget_driver,
+			 dwc->err_evt_seen);
 		dbg_event(0xFF, "WaitPullup", 0);
 		return 0;
 	}
 	spin_unlock_irqrestore(&dwc->lock, flags);
 
+	dev_info(dwc->dev, "qkx: pullup(%d) proceeding\n", is_on);
 	pm_runtime_get_sync(dwc->dev);
+	dev_info(dwc->dev, "qkx: pullup pm_runtime_get_sync done\n");
 	dbg_event(0xFF, "Pullup gsync",
 		atomic_read(&dwc->dev->power.usage_count));
 
@@ -2553,6 +2560,8 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 
 	ret = dwc3_gadget_run_stop_util(dwc);
 	spin_unlock_irqrestore(&dwc->lock, flags);
+	dev_info(dwc->dev, "qkx: pullup run_stop_util ret=%d gadget_state=%d\n",
+		 ret, dwc->gadget_state);
 	if (!is_on && ret == -ETIMEDOUT) {
 		/*
 		 * If we fail to stop the controller then mark it as an error
@@ -2572,6 +2581,67 @@ done:
 	dbg_event(0xFF, "Pullup put",
 		atomic_read(&dwc->dev->power.usage_count));
 	return ret;
+}
+
+/* qkx: post-bind USB state dump — decodes whether the core ever saw the
+ * host's bus reset (DSTS DCNN/connect + SSTS speed) and whether the event
+ * machinery produced anything (GEVNTCOUNT), plus GIC line state via the
+ * irqchip API (no raw MMIO).
+ */
+static void qkx_usb_dump_regs(struct dwc3 *dwc, const char *tag)
+{
+	bool pend = false, act = false;
+	struct device *p = dwc->dev->parent;
+	bool susp = pm_runtime_suspended(dwc->dev);
+	bool psusp = p ? pm_runtime_suspended(p) : false;
+
+	irq_get_irqchip_state(dwc->irq, IRQCHIP_STATE_PENDING, &pend);
+	irq_get_irqchip_state(dwc->irq, IRQCHIP_STATE_ACTIVE, &act);
+	dev_info(dwc->dev,
+		 "qkx: %s: pm(core susp=%d use=%d parent susp=%d use=%d) in_lpm=%d gic(pend=%d act=%d)\n",
+		 tag, susp,
+		 atomic_read(&dwc->dev->power.usage_count), psusp,
+		 p ? atomic_read(&p->power.usage_count) : -1,
+		 atomic_read(&dwc->in_lpm), pend, act);
+
+	/* read-only: no pm_runtime_get_sync here — resuming would CSFTRST and
+	 * re-init the core, perturbing the very state under observation. */
+	if (!susp && !psusp) {
+		u32 dctl, dsts, devten, evsiz, evcnt;
+
+		dctl = dwc3_readl(dwc->regs, DWC3_DCTL);
+		dsts = dwc3_readl(dwc->regs, DWC3_DSTS);
+		devten = dwc3_readl(dwc->regs, DWC3_DEVTEN);
+		evsiz = dwc3_readl(dwc->regs, DWC3_GEVNTSIZ(0));
+		evcnt = dwc3_readl(dwc->regs, DWC3_GEVNTCOUNT(0));
+		dev_info(dwc->dev,
+			 "qkx: %s: GSNPSID=%08x GCTL=%08x DCTL=%08x DSTS=%08x (spd=%d link=%d) DEVTEN=%08x EVSIZ=%08x EVCNT=%08x\n",
+			 tag, dwc3_readl(dwc->regs, DWC3_GSNPSID),
+			 dwc3_readl(dwc->regs, DWC3_GCTL), dctl, dsts,
+			 dsts & DWC3_DSTS_CONNECTSPD,
+			 (dsts & DWC3_DSTS_USBLNKST_MASK) >> 18, devten,
+			 evsiz, evcnt);
+	} else {
+		dev_info(dwc->dev, "qkx: %s: skipping MMIO reads (runtime suspended)\n",
+			 tag);
+	}
+}
+
+static void qkx_usb_dump_work(struct work_struct *w);
+static DECLARE_DELAYED_WORK(qkx_usb_dump_work_w, qkx_usb_dump_work);
+static struct dwc3 *qkx_dump_dwc;
+static int qkx_dump_rounds;
+
+static void qkx_usb_dump_work(struct work_struct *w)
+{
+	struct dwc3 *dwc = qkx_dump_dwc;
+
+	if (!dwc)
+		return;
+	qkx_usb_dump_regs(dwc, "post-bind dump");
+	if (++qkx_dump_rounds < 4)
+		schedule_delayed_work(&qkx_usb_dump_work_w,
+				msecs_to_jiffies(3000));
 }
 
 static void dwc3_gadget_enable_irq(struct dwc3 *dwc)
@@ -2667,6 +2737,9 @@ static int dwc3_gadget_vbus_session(struct usb_gadget *_gadget, int is_active)
 	is_active = !!is_active;
 
 	dbg_event(0xFF, "VbusSess", is_active);
+
+	dev_info(dwc->dev, "qkx: vbus_session(%d) enter vbus_active=%d state=%d\n",
+		 is_active, dwc->vbus_active, dwc->gadget_state);
 
 	disable_irq(dwc->irq);
 
@@ -2774,6 +2847,21 @@ static int __dwc3_gadget_start(struct dwc3 *dwc)
 
 	dwc3_gadget_enable_irq(dwc);
 
+	dev_info(dwc->dev,
+		 "qkx: gadget_start done: DEVTEN=%08x irq=%d hwirq=untouched\n",
+		 dwc3_readl(dwc->regs, DWC3_DEVTEN), dwc->irq);
+
+	/* qkx: pin the dwc3 core child awake while the gadget driver is
+	 * bound. Runtime-PM autosuspend parks the core ~1s after bind,
+	 * killing the gadget mid-enumeration (host sees chirp then -110). */
+	pm_runtime_get_noresume(dwc->dev);
+	dev_info(dwc->dev, "qkx: core pinned awake (use=%d)\n",
+		 atomic_read(&dwc->dev->power.usage_count));
+
+	qkx_dump_dwc = dwc;
+	qkx_dump_rounds = 0;
+	schedule_delayed_work(&qkx_usb_dump_work_w, msecs_to_jiffies(2000));
+
 	return 0;
 
 err1:
@@ -2833,6 +2921,9 @@ static int dwc3_gadget_stop(struct usb_gadget *g)
 	spin_lock_irqsave(&dwc->lock, flags);
 	dwc->gadget_driver	= NULL;
 	spin_unlock_irqrestore(&dwc->lock, flags);
+
+	/* qkx: release the gadget_start pin */
+	pm_runtime_put_noidle(dwc->dev);
 
 	dbg_event(0xFF, "fwq_started", 0);
 	flush_workqueue(dwc->dwc_wq);

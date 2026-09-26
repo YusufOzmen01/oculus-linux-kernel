@@ -784,6 +784,14 @@ static int msm_ssphy_qmp_extcon_register(struct msm_ssphy_qmp *phy,
 
 	edev = extcon_get_edev_by_phandle(dev, 0);
 	if (IS_ERR(edev)) {
+		/* qkx: the pdphy extcon provider never registers after kexec
+		 * (its usb/dc power supplies stay absent). Continue without the
+		 * DP extcon so the PHY still binds; matches the non-DP PHY state. */
+		if (PTR_ERR(edev) == -EPROBE_DEFER) {
+			dev_info(dev,
+				 "qkx: extcon deferring; continuing without extcon\n");
+			return 0;
+		}
 		dev_err(dev, "failed to get phandle for msm_ssphy_qmp\n");
 		return PTR_ERR(edev);
 	}

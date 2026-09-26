@@ -117,6 +117,11 @@ pe_header:
 	 *                                        current RELR displacement
 	 */
 ENTRY(stext)
+	/* The replacement boot must not inherit or re-arm the AP watchdog. */
+	movz	x9, #0
+	movk	x9, #0x17c1, lsl #16
+	str	wzr, [x9, #0x08]
+	dsb	sy
 	bl	preserve_boot_args
 	bl	el2_setup			// Drop to EL1, w0=cpu_boot_mode
 	adrp	x23, __PHYS_OFFSET

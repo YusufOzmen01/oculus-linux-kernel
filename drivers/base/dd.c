@@ -202,14 +202,45 @@ void device_unblock_probing(void)
 	driver_deferred_probe_trigger();
 }
 
-static void enable_trigger_defer_cycle(void)
+/* qkx: explicit diagnostic kick enables slow per-probe tracing. */
+bool qkx_probe_trace;
+/* Devices known to be unsafe or blocking when inherited across kexec. */
+static char *qkx_probe_skip =
+	"c440000.qcom,spmi:qcom,pm8150b@2:qcom,qpnp-smb5|"
+	"ac4d000.qcom,cpas-cdm0";
+core_param(qkx_probe_skip, qkx_probe_skip, charp, 0444);
+
+static bool qkx_probe_is_skipped(const char *name)
 {
+	const char *p = qkx_probe_skip;
+	size_t n;
+
+	while (p && *p) {
+		n = strcspn(p, "|");
+		if (strlen(name) == n && !strncmp(name, p, n))
+			return true;
+		p += n;
+		if (*p == '|')
+			p++;
+	}
+	return false;
+}
+
+void qkx_deferred_probe_kick(void)
+{
+	pr_emerg("qkx: userspace kick of deferred probing\n");
+	qkx_probe_trace = true;
 	driver_deferred_probe_enable = true;
 	driver_deferred_probe_trigger();
-	/*
-	 * Sort as many dependencies as possible before the next initcall
-	 * level
+}
+
+static void enable_trigger_defer_cycle(void)
+{
+	/* The inherited-state hazards are parked by qkx_probe_skip, so run the
+	 * vendor kernel's normal dependency-resolution cycle at each sync level.
 	 */
+	driver_deferred_probe_enable = true;
+	driver_deferred_probe_trigger();
 	flush_work(&deferred_probe_work);
 }
 
@@ -311,16 +342,9 @@ static int deferred_probe_enable_fn(void)
 	deferred_devices = debugfs_create_file("devices_deferred", 0444, NULL,
 					       NULL, &deferred_devs_fops);
 
-	/* Enable deferred probing for all time */
-	enable_trigger_defer_cycle();
-	initcalls_done = true;
-
-	/*
-	 * Trigger deferred probe again, this time we won't defer anything
-	 * that is optional
-	 */
+	driver_deferred_probe_enable = true;
 	driver_deferred_probe_trigger();
-	flush_work(&deferred_probe_work);
+	initcalls_done = true;
 
 	if (deferred_probe_timeout > 0) {
 		schedule_delayed_work(&deferred_probe_timeout_work,
@@ -481,8 +505,14 @@ static int really_probe(struct device *dev, struct device_driver *drv)
 	int local_trigger_count = atomic_read(&deferred_trigger_count);
 	bool test_remove = IS_ENABLED(CONFIG_DEBUG_TEST_DRIVER_REMOVE) &&
 			   !drv->suppress_bind_attrs;
+	bool qkx_trace = strstr(dev_name(dev), "ssusb") ||
+			 strstr(dev_name(dev), "ssphy") ||
+			 strstr(dev_name(dev), "dwc3");
 
 	if (defer_all_probes) {
+		if (qkx_trace)
+			dev_info(dev, "qkx: defer_all_probes for %s\n",
+				 drv->name);
 		/*
 		 * Value of defer_all_probes can be set only by
 		 * device_defer_all_probes_enable() which, in turn, will call
@@ -496,8 +526,12 @@ static int really_probe(struct device *dev, struct device_driver *drv)
 	ret = device_links_check_suppliers(dev);
 	if (ret == -EPROBE_DEFER)
 		driver_deferred_probe_add_trigger(dev, local_trigger_count);
-	if (ret)
+	if (ret) {
+		if (qkx_trace)
+			dev_info(dev, "qkx: suppliers ret=%d drv=%s\n",
+				 ret, drv->name);
 		return ret;
+	}
 
 	atomic_inc(&probe_count);
 	pr_debug("bus: '%s': %s: probing driver %s with device %s\n",
@@ -513,12 +547,18 @@ re_probe:
 
 	/* If using pinctrl, bind pins now before probing */
 	ret = pinctrl_bind_pins(dev);
-	if (ret)
+	if (ret) {
+		if (qkx_trace)
+			dev_info(dev, "qkx: pinctrl ret=%d\n", ret);
 		goto pinctrl_bind_failed;
+	}
 
 	ret = dma_configure(dev);
-	if (ret)
+	if (ret) {
+		if (qkx_trace)
+			dev_info(dev, "qkx: dma_configure ret=%d\n", ret);
 		goto probe_failed;
+	}
 
 	if (driver_sysfs_add(dev)) {
 		printk(KERN_ERR "%s: driver_sysfs_add(%s) failed\n",
@@ -532,15 +572,25 @@ re_probe:
 			goto probe_failed;
 	}
 
+	if (qkx_probe_is_skipped(dev_name(dev))) {
+		dev_warn_once(dev, "qkx: probe parked for kexec safety\n");
+		ret = -EPROBE_DEFER;
+		goto probe_failed;
+	}
+	if (qkx_probe_trace) {
+		pr_emerg("qkx: probe %s drv=%s\n", dev_name(dev), drv->name);
+		/* Diagnostic mode only: let the line reach the host before MMIO. */
+		msleep(200);
+	}
 	if (dev->bus->probe) {
 		ret = dev->bus->probe(dev);
-		if (ret)
-			goto probe_failed;
 	} else if (drv->probe) {
 		ret = drv->probe(dev);
-		if (ret)
-			goto probe_failed;
 	}
+	if (qkx_probe_trace)
+		pr_emerg("qkx: probe %s ret=%d\n", dev_name(dev), ret);
+	if (ret)
+		goto probe_failed;
 
 	if (test_remove) {
 		test_remove = false;
@@ -591,11 +641,15 @@ pinctrl_bind_failed:
 	switch (ret) {
 	case -EPROBE_DEFER:
 		/* Driver requested deferred probing */
+		if (qkx_trace)
+			dev_info(dev, "qkx: probe deferred (ret=%d)\n", ret);
 		dev_dbg(dev, "Driver %s requests probe deferral\n", drv->name);
 		driver_deferred_probe_add_trigger(dev, local_trigger_count);
 		break;
 	case -ENODEV:
 	case -ENXIO:
+		if (qkx_trace)
+			dev_info(dev, "qkx: probe rejects match (ret=%d)\n", ret);
 		pr_debug("%s: probe of %s rejects match %d\n",
 			 drv->name, dev_name(dev), ret);
 		break;

@@ -513,6 +513,25 @@ static void __init gic_dist_init(void)
 	for (i = 32; i < gic_data.irq_nr; i += 32)
 		writel_relaxed(~0, base + GICD_IGROUPR + i / 8);
 
+	/*
+	 * qkx: kexec hygiene. The previous kernel may have died with SPIs
+	 * left pending or (worse) active without EOI. A GICv3 SPI stuck in
+	 * active state is never re-signalled, permanently wedging the
+	 * interrupt line (e.g. dwc3 serving ADB at kexec time). Clear both
+	 * states for all SPIs while the distributor is disabled.
+	 */
+	for (i = 32; i < gic_data.irq_nr; i += 32) {
+		u32 act = readl_relaxed(base + GICD_ISACTIVER + i / 8);
+		u32 pend = readl_relaxed(base + GICD_ISPENDR + i / 8);
+
+		if (act || pend)
+			pr_info("qkx: gic stale SPI state at kexec: hwirq %d-%d act=%08x pend=%08x\n",
+				i, min(i + 31, gic_data.irq_nr - 1), act, pend);
+
+		writel_relaxed(~0, base + GICD_ICPENDR + i / 8);
+		writel_relaxed(~0, base + GICD_ICACTIVER + i / 8);
+	}
+
 	gic_dist_config(base, gic_data.irq_nr, gic_dist_wait_for_rwp);
 
 	/* Enable distributor with ARE, Group1 */

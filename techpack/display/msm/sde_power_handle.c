@@ -293,8 +293,10 @@ static int _sde_power_data_bus_set_quota(
 	int rc;
 
 	if (pdbus->data_bus_hdl < 1) {
-		pr_err("invalid bus handle %d\n", pdbus->data_bus_hdl);
-		return -EINVAL;
+		/* qkx: data_bus_hdl==0 is now a normal, tolerated "no bus
+		 * scaling available" state (see sde_power_data_bus_parse);
+		 * skip the vote instead of failing the caller. */
+		return 0;
 	}
 
 	if (!in_ab_quota && !in_ib_quota)  {
@@ -405,8 +407,10 @@ static int sde_power_data_bus_parse(struct platform_device *pdev,
 	pdbus->data_bus_hdl = msm_bus_scale_register_client(
 			pdbus->data_bus_scale_table);
 	if (!pdbus->data_bus_hdl) {
-		pr_err("data_bus_client register failed\n");
-		rc = -EINVAL;
+		/* qkx: same msm_bus unavailability as sde_power_reg_bus_parse;
+		 * continue without data-bus scaling rather than failing probe. */
+		pr_warn("qkx: data_bus_client register failed; continuing without bus scaling\n");
+		rc = 0;
 		goto end;
 	}
 	pr_debug("register %s data_bus_hdl=%x\n", name, pdbus->data_bus_hdl);
@@ -435,8 +439,17 @@ static int sde_power_reg_bus_parse(struct platform_device *pdev,
 		phandle->reg_bus_hdl = msm_bus_scale_register_client(
 			      bus_scale_table);
 		if (!phandle->reg_bus_hdl) {
-			pr_err("reg_bus_client register failed\n");
-			rc = -EINVAL;
+			/*
+			 * qkx: after kexec msm_bus may never come up (deferred
+			 * retries are disabled in this diagnostic kernel), which
+			 * would leave the whole KMS/DRM device probe permanently
+			 * dead. reg_bus_hdl==0 is already the "no bus scaling"
+			 * state every other caller in this file guards against
+			 * (sde_power_reg_bus_unregister/_update), so continue
+			 * without it instead of failing the probe.
+			 */
+			pr_warn("qkx: reg_bus_client register failed; continuing without bus scaling\n");
+			rc = 0;
 			goto end;
 		}
 		pr_debug("register reg_bus_hdl=%x\n", phandle->reg_bus_hdl);
@@ -528,6 +541,12 @@ int sde_power_resource_init(struct platform_device *pdev,
 	}
 	mp = &phandle->mp;
 	phandle->dev = &pdev->dev;
+	/* Deinit is called on deferred/failed probes, so synchronization and
+	 * list state must be valid before the first operation that can fail. */
+	INIT_LIST_HEAD(&phandle->event_list);
+	mutex_init(&phandle->phandle_lock);
+	phandle->rsc_client = NULL;
+	phandle->rsc_client_init = false;
 
 	rc = sde_power_parse_dt_clock(pdev, mp);
 	if (rc) {
@@ -583,13 +602,6 @@ int sde_power_resource_init(struct platform_device *pdev,
 						"qcom,dss-cx-ipeak");
 	else
 		pr_debug("cx ipeak client parse failed\n");
-
-	INIT_LIST_HEAD(&phandle->event_list);
-
-	phandle->rsc_client = NULL;
-	phandle->rsc_client_init = false;
-
-	mutex_init(&phandle->phandle_lock);
 
 	return rc;
 

@@ -81,5 +81,9 @@ static int __init msm_bus_proxy_client_unvote(void)
 	return 0;
 }
 
-subsys_initcall_sync(msm_bus_proxy_client_init_driver);
-late_initcall_sync(msm_bus_proxy_client_unvote);
+/* Quest kexec: the RPMh bus fabric is deliberately disabled, so registering
+ * its proxy client would block forever. The diagnostic environment does not
+ * need bus bandwidth votes.
+ */
+/* subsys_initcall_sync(msm_bus_proxy_client_init_driver); */
+/* late_initcall_sync(msm_bus_proxy_client_unvote); */

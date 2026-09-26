@@ -3716,6 +3716,7 @@ static int dwc_dpdm_cb(struct notifier_block *nb, unsigned long evt, void *p)
 static int dwc3_msm_probe(struct platform_device *pdev)
 {
 	struct device_node *node = pdev->dev.of_node, *dwc3_node;
+	struct device_node *child = NULL;
 	struct device	*dev = &pdev->dev;
 	struct dwc3_msm *mdwc;
 	struct dwc3	*dwc;
@@ -3726,6 +3727,8 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 	mdwc = devm_kzalloc(&pdev->dev, sizeof(*mdwc), GFP_KERNEL);
 	if (!mdwc)
 		return -ENOMEM;
+
+	dev_info(&pdev->dev, "qkx: dwc3_msm_probe enter\n");
 
 	platform_set_drvdata(pdev, mdwc);
 	mdwc->dev = &pdev->dev;
@@ -3759,7 +3762,7 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 	/* Get all clks and gdsc reference */
 	ret = dwc3_msm_get_clk_gdsc(mdwc);
 	if (ret) {
-		dev_err(&pdev->dev, "error getting clock or gdsc.\n");
+		dev_err(&pdev->dev, "error getting clock or gdsc. ret=%d\n", ret);
 		goto err;
 	}
 
@@ -3916,8 +3919,16 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 		}
 	}
 
-	/* Assumes dwc3 is the first DT child of dwc3-msm */
-	dwc3_node = of_get_next_available_child(node, NULL);
+	/* Assumes dwc3 is the first DT child of dwc3-msm. qkx: the captured
+	 * runtime DTB lists qcom,usbbam before dwc3, so look the dwc3 child
+	 * up by compatible instead of blindly taking the first child. */
+	dwc3_node = NULL;
+	for_each_available_child_of_node(node, child) {
+		if (of_device_is_compatible(child, "snps,dwc3")) {
+			dwc3_node = child;
+			break;
+		}
+	}
 	if (!dwc3_node) {
 		dev_err(&pdev->dev, "failed to find dwc3 child\n");
 		ret = -ENODEV;
@@ -4027,7 +4038,16 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 
 	if (of_property_read_bool(node, "extcon")) {
 		ret = dwc3_msm_extcon_register(mdwc);
-		if (ret)
+		if (ret == -EPROBE_DEFER) {
+			/* qkx: the pdphy extcon provider never comes up after
+		 * kexec, so deferring here parks USB forever (deferred
+		 * retries are disabled in the diagnostic kernel). Mirror
+		 * the no-extcon DRD default and start peripheral mode. */
+			dev_info(mdwc->dev,
+				 "qkx: extcon defer; starting peripheral mode\n");
+			mdwc->vbus_active = true;
+			dwc3_ext_event_notify(mdwc);
+		} else if (ret)
 			goto put_dwc3;
 
 		/*
@@ -4984,7 +5004,10 @@ MODULE_DESCRIPTION("DesignWare USB3 MSM Glue Layer");
 
 static int dwc3_msm_init(void)
 {
-	return platform_driver_register(&dwc3_msm_driver);
+	int ret = platform_driver_register(&dwc3_msm_driver);
+
+	pr_info("qkx: dwc3_msm_init platform_driver_register=%d\n", ret);
+	return ret;
 }
 module_init(dwc3_msm_init);
 

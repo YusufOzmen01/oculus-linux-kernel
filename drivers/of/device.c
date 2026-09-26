@@ -160,8 +160,21 @@ int of_dma_configure(struct device *dev, struct device_node *np, bool force_dma)
 		coherent ? " " : " not ");
 
 	iommu = of_iommu_configure(dev, np);
-	if (IS_ERR(iommu) && PTR_ERR(iommu) == -EPROBE_DEFER)
-		return -EPROBE_DEFER;
+	if (IS_ERR(iommu) && PTR_ERR(iommu) == -EPROBE_DEFER) {
+		/* qkx: after kexec the apps-smmu never claims the platform bus
+		 * (its probe defers permanently and deferred retries are
+		 * disabled), which parks the dwc3-msm glue in dma_configure
+		 * forever. The glue's iommu_map is unused and gadget DMA works
+		 * through the sysdev with direct DMA/swiotlb, so continue
+		 * without an iommu for this node only. */
+		if (of_device_is_compatible(np, "qcom,dwc-usb3-msm")) {
+			dev_info(dev,
+				 "qkx: iommu defer; continuing without iommu\n");
+			iommu = NULL;
+		} else {
+			return -EPROBE_DEFER;
+		}
+	}
 
 	dev_dbg(dev, "device is%sbehind an iommu\n",
 		iommu ? " " : " not ");

@@ -1532,6 +1532,27 @@ static int disp_cc_kona_probe(struct platform_device *pdev)
 		return PTR_ERR(regmap);
 	}
 
+	/*
+	 * qkx: disp_cc and gcc are both subsys_initcall; if disp_cc's link
+	 * order runs first, devm_clk_get("cfg_ahb_clk") returns -EPROBE_DEFER
+	 * and (with deferred-probe retries disabled kernel-wide in this
+	 * diagnostic build) that failure was permanent.
+	 *
+	 * A local msleep-based retry loop was tried here and made things
+	 * worse: subsys_initcall runs single-threaded, so blocking inside
+	 * disp_cc's own probe also blocks every later subsys_initcall from
+	 * running at all -- including gcc-kona's, which is the one thing
+	 * disp_cc is waiting on. Confirmed directly: dmesg showed a ~20s gap
+	 * with zero log lines from any driver, ending exactly at the retry
+	 * loop's own deadline, with gcc-kona's "Registered GCC clocks"
+	 * appearing only after. The loop was waiting for something it was
+	 * itself preventing from happening.
+	 *
+	 * The actual fix is below: disp_cc_kona_init() is registered at
+	 * fs_initcall, one level after subsys_initcall, so gcc-kona (and the
+	 * RPMh regulator framework, which registers even earlier at
+	 * arch_initcall) are guaranteed to have already run.
+	 */
 	clk = devm_clk_get(&pdev->dev, "cfg_ahb_clk");
 	if (IS_ERR(clk)) {
 		if (PTR_ERR(clk) != -EPROBE_DEFER)
@@ -1550,8 +1571,14 @@ static int disp_cc_kona_probe(struct platform_device *pdev)
 
 	dispcc_bus_id = msm_bus_scale_register_client(&clk_debugfs_scale_table);
 	if (!dispcc_bus_id) {
-		dev_err(&pdev->dev, "Unable to register for bw voting\n");
-		return -EPROBE_DEFER;
+		/*
+		 * qkx: after kexec msm_bus may never come up (deferred retries
+		 * are disabled in this diagnostic kernel), which would leave
+		 * every display clock missing. The vote only serves debugfs
+		 * clock measurement and all users check for a zero id.
+		 */
+		dev_warn(&pdev->dev,
+			 "qkx: bw voting unavailable; continuing without it\n");
 	}
 	for (i = 0; i < ARRAY_SIZE(disp_cc_kona_clocks); i++)
 		if (disp_cc_kona_clocks[i])
@@ -1587,7 +1614,8 @@ static int __init disp_cc_kona_init(void)
 {
 	return platform_driver_register(&disp_cc_kona_driver);
 }
-subsys_initcall(disp_cc_kona_init);
+/* qkx: was subsys_initcall; see the ordering comment in disp_cc_kona_probe(). */
+fs_initcall(disp_cc_kona_init);
 
 static void __exit disp_cc_kona_exit(void)
 {

@@ -76,6 +76,7 @@ struct clk_aop_qmp {
 };
 
 static DEFINE_MUTEX(clk_aop_lock);
+extern bool qkx_qmp_inherited_ready;
 
 static unsigned long clk_aop_qmp_recalc_rate(struct clk_hw *hw,
 						unsigned long parent_rate)
@@ -329,9 +330,18 @@ static int aop_qmp_clk_probe(struct platform_device *pdev)
 	 * Proxy vote on the QDSS clock. This is needed to avoid issues with
 	 * excessive requests on the QMP layer during the QDSS driver probe.
 	 */
-	ret = clk_aop_qmp_prepare(&qdss_qmp_clk.hw);
-	if (ret < 0)
-		goto fail;
+	if (qkx_qmp_inherited_ready) {
+		/* Android's CLK_ENABLE_HAND_OFF QDSS proxy vote remains active.
+		 * Sending the duplicate first vote after adopting its QMP link is
+		 * not acknowledged by AOP, exactly what enabled is meant to avoid.
+		 */
+		qdss_qmp_clk.enabled = true;
+		dev_info(&pdev->dev, "qkx: adopting inherited QDSS proxy vote\n");
+	} else {
+		ret = clk_aop_qmp_prepare(&qdss_qmp_clk.hw);
+		if (ret < 0)
+			goto fail;
+	}
 
 	for (i = 0; i < num_clks; i++) {
 		if (!aop_qmp_clk_hws[i])

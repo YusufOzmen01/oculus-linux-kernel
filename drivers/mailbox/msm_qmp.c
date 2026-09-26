@@ -5,6 +5,7 @@
 
 #include <linux/io.h>
 #include <linux/interrupt.h>
+#include <linux/delay.h>
 #include <linux/types.h>
 #include <linux/spinlock.h>
 #include <linux/completion.h>
@@ -33,6 +34,13 @@
 #define MSG_RAM_ALIGN_BYTES 3
 
 #define QMP_IPC_LOG_PAGE_CNT 2
+
+/* Force a DOWN->UP QMP edge when inheriting live AOP state across kexec. */
+static bool qkx_qmp_rehandshake;
+core_param(qkx_qmp_rehandshake, qkx_qmp_rehandshake, bool, 0444);
+static bool qkx_qmp_adopt;
+core_param(qkx_qmp_adopt, qkx_qmp_adopt, bool, 0444);
+bool qkx_qmp_inherited_ready;
 #define QMP_INFO(ctxt, x, ...)						  \
 do {									  \
 	if (ctxt)							  \
@@ -162,6 +170,7 @@ struct qmp_mbox {
 	struct completion ch_complete;
 	struct delayed_work dwork;
 	struct qmp_device *mdev;
+	bool qkx_adopted;
 };
 
 /**
@@ -347,6 +356,20 @@ static int qmp_startup(struct mbox_chan *chan)
 		set_mcore_ch(mbox, QMP_MBOX_CH_CONNECTED);
 		mbox->local_state = LOCAL_CONNECTING;
 		send_irq(mbox->mdev);
+		if (mbox->qkx_adopted) {
+			struct mbox_desc desc;
+
+			memcpy_fromio(&desc, mbox->desc, sizeof(desc));
+			if (desc.ucore.ch_state == QMP_MBOX_CH_CONNECTED &&
+			    desc.ucore.ch_state_ack == QMP_MBOX_CH_CONNECTED &&
+			    desc.mcore.ch_state == QMP_MBOX_CH_CONNECTED &&
+			    desc.mcore.ch_state_ack == QMP_MBOX_CH_CONNECTED) {
+				mbox->local_state = CHANNEL_CONNECTED;
+				complete_all(&mbox->ch_complete);
+				pr_emerg("qkxqmp: %s adopted connected channel\n",
+					 mbox->mdev->name);
+			}
+		}
 	}
 	mutex_unlock(&mbox->state_lock);
 
@@ -510,6 +533,24 @@ static void init_mcore_state(struct qmp_mbox *mbox)
 	memcpy32_toio(mbox->desc + offset, &mcore, sizeof(mcore));
 }
 
+static void qkx_reset_mcore_state(struct qmp_mbox *mbox)
+{
+	struct channel_desc mcore = {
+		.link_state = QMP_MBOX_LINK_DOWN,
+		.link_state_ack = QMP_MBOX_LINK_DOWN,
+		.ch_state = QMP_MBOX_CH_DISCONNECTED,
+		.ch_state_ack = QMP_MBOX_CH_DISCONNECTED,
+		.mailbox_size = mbox->mcore_mbox_size,
+		.mailbox_offset = mbox->mcore_mbox_offset,
+	};
+	u32 offset = offsetof(struct mbox_desc, mcore);
+
+	memcpy32_toio(mbox->desc + offset, &mcore, sizeof(mcore));
+	mbox->local_state = LINK_DISCONNECTED;
+	reinit_completion(&mbox->link_complete);
+	reinit_completion(&mbox->ch_complete);
+}
+
 /**
  * qmp_irq_handler() - handle irq from remote entitity.
  * @irq:	irq number for the trggered interrupt.
@@ -568,7 +609,12 @@ static void __qmp_rx_worker(struct qmp_mbox *mbox)
 	case LINK_NEGOTIATION:
 		if (desc.mcore.link_state_ack != QMP_MBOX_LINK_UP ||
 				desc.mcore.link_state != QMP_MBOX_LINK_UP) {
-			QMP_ERR(mdev->ilc, "RX int without negotiation ack\n");
+			QMP_ERR(mdev->ilc,
+				"RX without ack: ulink=%08x uack=%08x uch=%08x ucack=%08x mlink=%08x mack=%08x mch=%08x mcack=%08x\n",
+				desc.ucore.link_state, desc.ucore.link_state_ack,
+				desc.ucore.ch_state, desc.ucore.ch_state_ack,
+				desc.mcore.link_state, desc.mcore.link_state_ack,
+				desc.mcore.ch_state, desc.mcore.ch_state_ack);
 			break;
 		}
 		mbox->local_state = LINK_CONNECTED;
@@ -990,6 +1036,90 @@ static int qmp_mbox_probe(struct platform_device *pdev)
 	if (ret < 0)
 		QMP_ERR(mdev->ilc, "enable_irq_wake on %d failed: %d\n",
 			mdev->rx_irq_line, ret);
+
+	if (qkx_qmp_adopt) {
+		struct qmp_mbox *mbox;
+
+		list_for_each_entry(mbox, &mdev->mboxes, list) {
+			struct mbox_desc desc;
+			unsigned int wait;
+
+			memcpy_fromio(&desc, mbox->desc, sizeof(desc));
+			if (desc.magic == QMP_MAGIC &&
+			    desc.ucore.link_state == QMP_MBOX_LINK_UP &&
+			    desc.ucore.link_state_ack == QMP_MBOX_LINK_UP &&
+			    desc.mcore.link_state == QMP_MBOX_LINK_UP &&
+			    desc.mcore.link_state_ack == QMP_MBOX_LINK_UP) {
+				/* Normal LINK_DISCONNECTED negotiation imports these
+				 * values before publishing mcore state. Adoption bypasses
+				 * that branch, so import them from the inherited descriptor.
+				 */
+				mbox->version.version = desc.version;
+				mbox->version.features = desc.features;
+				if (desc.mcore.mailbox_size) {
+					mbox->mcore_mbox_size = desc.mcore.mailbox_size;
+					mbox->mcore_mbox_offset = desc.mcore.mailbox_offset;
+				}
+				if (!mbox->rx_pkt.data && desc.ucore.mailbox_size)
+					mbox->rx_pkt.data = devm_kzalloc(mdev->dev,
+						desc.ucore.mailbox_size, GFP_KERNEL);
+				if (!mbox->rx_pkt.data) {
+					pr_emerg("qkxqmp: %s failed inherited RX allocation\n",
+						 mdev->name);
+					continue;
+				}
+				/* Preserve the live AOP link, but close the inherited
+				 * logical channel so the normal startup path creates a
+				 * fresh channel transaction context for this kernel.
+				 */
+				disable_irq(mdev->rx_irq_line);
+				set_mcore_ch(mbox, QMP_MBOX_CH_DISCONNECTED);
+				/* Android may die with an outstanding nonzero mailbox
+				 * length. AOP detects a new packet on zero -> nonzero;
+				 * clear it while the inherited channel is closed.
+				 */
+				iowrite32(0, mbox->desc + mbox->mcore_mbox_offset);
+				mbox->tx_sent = false;
+				send_irq(mdev);
+				for (wait = 0; wait < 100; wait++) {
+					if (ioread32(mbox->desc +
+					    offsetof(struct mbox_desc,
+						     mcore.ch_state_ack)) ==
+					    QMP_MBOX_CH_DISCONNECTED)
+						break;
+					usleep_range(1000, 2000);
+				}
+				enable_irq(mdev->rx_irq_line);
+				if (wait == 100) {
+					pr_emerg("qkxqmp: %s inherited channel close timed out\n",
+						 mdev->name);
+					continue;
+				}
+				mbox->local_state = LINK_CONNECTED;
+				mbox->qkx_adopted = false;
+				qkx_qmp_inherited_ready = true;
+				complete_all(&mbox->link_complete);
+				pr_emerg("qkxqmp: %s adopted link and closed inherited channel\n",
+					 mdev->name);
+			}
+		}
+	}
+
+	if (qkx_qmp_rehandshake) {
+		struct qmp_mbox *mbox;
+
+		/* Android leaves the AP half LINK_UP. Writing UP again creates no
+		 * edge for the still-running AOP. Keep RX masked so a stale/pending
+		 * interrupt cannot make our worker overwrite DOWN before AOP sees it.
+		 */
+		disable_irq(mdev->rx_irq_line);
+		list_for_each_entry(mbox, &mdev->mboxes, list)
+			qkx_reset_mcore_state(mbox);
+		pr_emerg("qkxqmp: %s forced mcore link down\n", mdev->name);
+		send_irq(mdev);
+		msleep(20);
+		enable_irq(mdev->rx_irq_line);
+	}
 
 	/* Trigger fake RX in case of missed interrupt */
 	if (of_property_read_bool(edge_node, "qcom,early-boot"))

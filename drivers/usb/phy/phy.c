@@ -53,8 +53,10 @@ static struct usb_phy *__of_usb_find_phy(struct device_node *node)
 {
 	struct usb_phy  *phy;
 
-	if (!of_device_is_available(node))
+	if (!of_device_is_available(node)) {
+		pr_info("qkx: find_phy: node %pOF not available\n", node);
 		return ERR_PTR(-ENODEV);
+	}
 
 	list_for_each_entry(phy, &phy_list, head) {
 		if (node != phy->dev->of_node)
@@ -62,6 +64,10 @@ static struct usb_phy *__of_usb_find_phy(struct device_node *node)
 
 		return phy;
 	}
+
+	list_for_each_entry(phy, &phy_list, head)
+		pr_info("qkx: find_phy: want %pOF; list has %s node %pOF\n",
+			node, dev_name(phy->dev), phy->dev->of_node);
 
 	return ERR_PTR(-EPROBE_DEFER);
 }
@@ -318,8 +324,17 @@ static int usb_add_extcon(struct usb_phy *x)
 
 	if (of_property_read_bool(x->dev->of_node, "extcon")) {
 		x->edev = extcon_get_edev_by_phandle(x->dev, 0);
-		if (IS_ERR(x->edev))
+		if (IS_ERR(x->edev)) {
+			/* qkx: after kexec the pdphy extcon provider never
+			 * appears; register the PHY without extcon support. */
+			if (PTR_ERR(x->edev) == -EPROBE_DEFER) {
+				dev_info(x->dev,
+					 "qkx: extcon defer; phy without extcon\n");
+				x->edev = NULL;
+				goto no_extcon;
+			}
 			return PTR_ERR(x->edev);
+		}
 
 		x->id_edev = extcon_get_edev_by_phandle(x->dev, 1);
 		if (IS_ERR(x->id_edev)) {
@@ -395,6 +410,7 @@ static int usb_add_extcon(struct usb_phy *x)
 		}
 	}
 
+no_extcon:
 	if (x->type_nb.notifier_call)
 		__usb_phy_get_charger_type(x);
 
@@ -555,6 +571,8 @@ struct usb_phy *devm_usb_get_phy_by_phandle(struct device *dev,
 
 	node = of_parse_phandle(dev->of_node, phandle, index);
 	if (!node) {
+		dev_info(dev, "qkx: get_phy: phandle %s idx %u missing in %pOF\n",
+			 phandle, index, dev->of_node);
 		dev_dbg(dev, "failed to get %s phandle in %pOF node\n", phandle,
 			dev->of_node);
 		return ERR_PTR(-ENODEV);

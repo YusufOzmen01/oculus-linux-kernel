@@ -405,7 +405,10 @@ static void __exit watchdog_exit(void)
 	ida_destroy(&watchdog_ida);
 }
 
-subsys_initcall_sync(watchdog_init);
+/* Quest kexec RAM diagnostic: registering inherited watchdog devices can
+ * block in hardware-specific setup. No watchdog userspace is required.
+ */
+/* subsys_initcall_sync(watchdog_init); */
 module_exit(watchdog_exit);
 
 MODULE_AUTHOR("Alan Cox <alan@lxorguk.ukuu.org.uk>");

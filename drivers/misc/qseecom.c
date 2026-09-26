@@ -1762,7 +1762,9 @@ static int __qseecom_unregister_listener_kthread_func(void *data)
 		wait_event_interruptible(
 			qseecom.unregister_lsnr_kthread_wq,
 			atomic_read(&qseecom.unregister_lsnr_kthread_state)
-				== LSNR_UNREG_KT_WAKEUP);
+				== LSNR_UNREG_KT_WAKEUP || kthread_should_stop());
+		if (kthread_should_stop())
+			break;
 		pr_debug("kthread to unregister listener is called %d\n",
 			atomic_read(&qseecom.unregister_lsnr_kthread_state));
 		__qseecom_processing_pending_lsnr_unregister();
@@ -3268,7 +3270,9 @@ static int __qseecom_unload_app_kthread_func(void *data)
 		wait_event_interruptible(
 			qseecom.unload_app_kthread_wq,
 			atomic_read(&qseecom.unload_app_kthread_state)
-				== UNLOAD_APP_KT_WAKEUP);
+				== UNLOAD_APP_KT_WAKEUP || kthread_should_stop());
+		if (kthread_should_stop())
+			break;
 		pr_debug("kthread to unload app is called, state %d\n",
 			atomic_read(&qseecom.unload_app_kthread_state));
 		__qseecom_processing_pending_unload_app();

@@ -91,6 +91,7 @@
 #include <linux/cache.h>
 #include <linux/rodata_test.h>
 #include <linux/jump_label.h>
+#include <linux/reboot.h>
 
 #include <asm/io.h>
 #include <asm/setup.h>
@@ -552,6 +553,70 @@ static void __init mm_init(void)
 	pti_init();
 }
 
+#define QKX_LOG_PHYS 0x9ba80000ULL
+#define QKX_LOG_SIZE 0x10000
+#define QKX_LOG_MAGIC 0x514b584c
+
+struct qkx_log_header {
+	u32 magic;
+	u32 write_pos;
+	u32 wraps;
+	u32 reserved;
+};
+
+static void __iomem *qkx_log;
+
+static void qkx_log_write(struct console *con, const char *s, unsigned int count)
+{
+	struct qkx_log_header __iomem *h = qkx_log;
+	u32 pos, wraps;
+	unsigned int i;
+	const u32 capacity = QKX_LOG_SIZE - sizeof(*h);
+
+	if (!h || readl_relaxed(&h->magic) != QKX_LOG_MAGIC)
+		return;
+	pos = readl_relaxed(&h->write_pos);
+	wraps = readl_relaxed(&h->wraps);
+	for (i = 0; i < count; i++) {
+		writeb_relaxed(s[i], qkx_log + sizeof(*h) + pos);
+		if (++pos == capacity) {
+			pos = 0;
+			wraps++;
+		}
+	}
+	writel_relaxed(pos, &h->write_pos);
+	writel_relaxed(wraps, &h->wraps);
+	wmb();
+}
+
+static struct console qkx_log_console = {
+	.name = "qkxram",
+	.write = qkx_log_write,
+	.flags = CON_ENABLED | CON_PRINTBUFFER,
+	.index = -1,
+};
+
+static void __init qkx_log_console_init(void)
+{
+	struct qkx_log_header __iomem *h;
+	struct page *pages[QKX_LOG_SIZE / PAGE_SIZE];
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(pages); i++)
+		pages[i] = pfn_to_page((QKX_LOG_PHYS >> PAGE_SHIFT) + i);
+	qkx_log = vmap(pages, ARRAY_SIZE(pages), VM_MAP | VM_IOREMAP,
+			pgprot_writecombine(PAGE_KERNEL));
+	if (!qkx_log)
+		return;
+	h = qkx_log;
+	memset_io(qkx_log, 0, QKX_LOG_SIZE);
+	writel_relaxed(0, &h->write_pos);
+	writel_relaxed(0, &h->wraps);
+	writel_relaxed(QKX_LOG_MAGIC, &h->magic);
+	wmb();
+	register_console(&qkx_log_console);
+}
+
 asmlinkage __visible void __init start_kernel(void)
 {
 	char *command_line;
@@ -686,6 +751,7 @@ asmlinkage __visible void __init start_kernel(void)
 	 * this. But we do want output early, in case something goes wrong.
 	 */
 	console_init();
+	qkx_log_console_init();
 	if (panic_later)
 		panic("Too many boot %s vars at `%s'", panic_later,
 		      panic_param);
@@ -959,9 +1025,227 @@ static char *initcall_level_names[] __initdata = {
 	"late",
 };
 
+static void __iomem *qkx_wdt;
+
+static void __init qkx_force_watchdog_off(void)
+{
+	if (!qkx_wdt)
+		qkx_wdt = ioremap(0x17c10000, 0x1000);
+	if (qkx_wdt) {
+		writel_relaxed(0, qkx_wdt + 0x08);
+		mb();
+	}
+}
+
+static atomic_t qkx_initcall_progress = ATOMIC_INIT(0);
+static atomic_t qkx_cur_level = ATOMIC_INIT(-1);
+static atomic_t qkx_cur_index = ATOMIC_INIT(-1);
+static atomic_t qkx_boot_done = ATOMIC_INIT(0);
+static char qkx_cur_name[128];
+
+extern void qkx_force_warm_reboot(void);
+extern void qkx_minimal_warm_reset(void) __noreturn;
+
+static int qkx_panic_warm_reset(struct notifier_block *nb,
+				unsigned long event, void *ptr)
+{
+	/* Avoid the Qualcomm kernel_panic restart reason: Android's
+	 * panicreporter loads rdbg and can itself panic before retained RAM is
+	 * collected. qpnp_pon and msm-poweroff are ready by the initcall stages
+	 * where diagnostic target panics have occurred. */
+	qkx_minimal_warm_reset();
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block qkx_panic_nb = {
+	.notifier_call = qkx_panic_warm_reset,
+	.priority = INT_MAX,
+};
+
+static void qkx_note_phase(int level, int index, const char *fmt, ...)
+{
+	va_list ap;
+
+	qkx_cur_name[0] = '\0';
+	va_start(ap, fmt);
+	vscnprintf(qkx_cur_name, sizeof(qkx_cur_name), fmt, ap);
+	va_end(ap);
+	/* publish name before the coordinates that reference it */
+	smp_wmb();
+	atomic_set(&qkx_cur_level, level);
+	atomic_set(&qkx_cur_index, index);
+	atomic_inc(&qkx_initcall_progress);
+}
+
+static void __init __maybe_unused qkx_diag_warm_reset(void)
+{
+	pr_emerg("QKX: deliberate retained-log warm reset\n");
+	qkx_force_warm_reboot();
+	machine_restart("qkx-log");
+	panic("QKX: machine_restart returned");
+}
+
+/*
+ * Boot watchdog running on a secondary CPU.  If boot progress
+ * stalls for several seconds (boot CPU hung with interrupts off),
+ * record the stall location directly in the retained RAM log and
+ * force a DRAM-preserving warm reset so the log can be recovered
+ * after Android returns.
+ */
+static int qkx_boot_watchdog(void *unused)
+{
+	u64 start_ns = ktime_get_mono_fast_ns();
+	u64 last_progress_ns = start_ns;
+	u64 last_hb_ns = start_ns;
+	int progress = atomic_read(&qkx_initcall_progress);
+
+	/* Pure busy loop: never sleep, never rely on timer IRQs or on
+	 * wakeups from deep idle (whose RPMh/AOP-assisted wake path may
+	 * be dead after the kexec handoff).  ktime_get_mono_fast_ns()
+	 * reads the arch counter directly, so this works with all
+	 * interrupts disabled and the scheduler frozen. */
+	while (!atomic_read(&qkx_boot_done)) {
+		int cur = atomic_read(&qkx_initcall_progress);
+		u64 now = ktime_get_mono_fast_ns();
+		u64 stall_ms, total_ms, limit_ms;
+		char msg[192];
+		int len;
+
+		if (cur != progress) {
+			progress = cur;
+			last_progress_ns = now;
+		}
+
+		stall_ms = (now - last_progress_ns) / 1000000;
+		total_ms = (now - start_ns) / 1000000;
+
+		/* Heartbeat into the retained log every 5s. */
+		if (now - last_hb_ns >= 5000000000ULL) {
+			last_hb_ns = now;
+			smp_rmb();
+			len = scnprintf(msg, sizeof(msg),
+				"QKX: hb t=%llums level=%d idx=%d fn %s\n",
+					(unsigned long long)total_ms,
+					atomic_read(&qkx_cur_level),
+					atomic_read(&qkx_cur_index),
+					qkx_cur_name);
+			qkx_log_write(NULL, msg, len);
+		}
+
+		/* Allow the built-in ~21s RCU stall detector to identify any CPU
+		 * blocking an expedited grace period before recovery resets us. */
+		limit_ms = (atomic_read(&qkx_cur_level) == 99) ?
+			   60000 : 30000;
+
+		/* Total boot time cap: kernel must reach userspace
+		 * (level 99) within 240s even with slow probes. */
+		if (atomic_read(&qkx_cur_level) != 99 && total_ms > 240000) {
+			smp_rmb();
+			len = scnprintf(msg, sizeof(msg),
+				"QKX: boot watchdog: 240s boot cap hit at level %d idx %d fn %s; forcing DRAM-preserving warm reset\n",
+					atomic_read(&qkx_cur_level),
+					atomic_read(&qkx_cur_index),
+					qkx_cur_name);
+			qkx_log_write(NULL, msg, len);
+			qkx_minimal_warm_reset();
+		}
+
+		if (stall_ms >= limit_ms) {
+			smp_rmb();
+			len = scnprintf(msg, sizeof(msg),
+				"QKX: boot watchdog: no progress for %ums; stalled at level %d index %d fn %s; forcing DRAM-preserving warm reset\n",
+					(unsigned int)stall_ms,
+					atomic_read(&qkx_cur_level),
+					atomic_read(&qkx_cur_index), qkx_cur_name);
+			qkx_log_write(NULL, msg, len);
+			/* Capture PID 1's live stack before resetting.  This is more
+			 * useful than another layer of initcall markers when a shared
+			 * synchronization primitive stalls at varying call sites. */
+			{
+				struct task_struct *init_task = NULL;
+
+				rcu_read_lock();
+				init_task = find_task_by_vpid(1);
+				if (init_task)
+					get_task_struct(init_task);
+				rcu_read_unlock();
+				if (init_task) {
+					pr_emerg("QKX: watchdog PID 1 stack follows\n");
+					sched_show_task(init_task);
+					put_task_struct(init_task);
+					mdelay(500);
+				}
+			}
+			qkx_minimal_warm_reset();
+		}
+
+		mdelay(20);
+		/* The watchdog intentionally never sleeps, but a permanent busy
+		 * loop otherwise prevents this CPU from reporting an RCU
+		 * quiescent state and deadlocks synchronize_rcu() during boot. */
+		rcu_note_voluntary_context_switch(current);
+	}
+	return 0;
+}
+
+static void __init qkx_start_boot_watchdog(void)
+{
+	struct task_struct *t;
+	int cpu = 1;
+
+	atomic_notifier_chain_register(&panic_notifier_list, &qkx_panic_nb);
+
+	while (cpu < num_possible_cpus() && !cpu_online(cpu))
+		cpu++;
+	if (cpu >= num_possible_cpus()) {
+		pr_warn("QKX: no secondary CPU for boot watchdog\n");
+		return;
+	}
+	t = kthread_create(qkx_boot_watchdog, NULL, "qkx-bwdog");
+	if (IS_ERR(t)) {
+		pr_warn("QKX: failed to create boot watchdog\n");
+		return;
+	}
+	kthread_bind(t, cpu);
+	wake_up_process(t);
+	pr_info("QKX: boot watchdog pinned to cpu%d\n", cpu);
+}
+
+/*
+ * Userspace keepalive channel: initramfs /init writes 'd' to disarm the
+ * boot watchdog once it reaches its steady state, or anything else to
+ * refresh progress while it is deliberately slow.
+ */
+void qkx_deferred_probe_kick(void);
+
+static ssize_t qkx_bootdone_write(struct file *f, const char __user *buf,
+				  size_t n, loff_t *pos)
+{
+	char c;
+
+	if (n < 1 || copy_from_user(&c, buf, 1))
+		return -EINVAL;
+	if (c == 'd')
+		atomic_set(&qkx_boot_done, 1);
+	else if (c == 'p')
+		qkx_deferred_probe_kick();
+	else if (c == 'r') {
+		pr_emerg("QKX: userspace requested DRAM-preserving warm reset\n");
+		qkx_minimal_warm_reset();
+	} else
+		atomic_inc(&qkx_initcall_progress);
+	return n;
+}
+
+static const struct file_operations qkx_bootdone_fops = {
+	.owner = THIS_MODULE,
+	.write = qkx_bootdone_write,
+};
+
 static void __init do_initcall_level(int level)
 {
 	initcall_entry_t *fn;
+	unsigned int qkx_index = 0;
 
 	strcpy(initcall_command_line, saved_command_line);
 	parse_args(initcall_level_names[level],
@@ -971,8 +1255,14 @@ static void __init do_initcall_level(int level)
 		   NULL, &repair_env_string);
 
 	trace_initcall_level(initcall_level_names[level]);
-	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++)
+	for (fn = initcall_levels[level]; fn < initcall_levels[level+1]; fn++) {
+		qkx_force_watchdog_off();
+		qkx_note_phase(level, qkx_index, "%pf", initcall_from_entry(fn));
 		do_one_initcall(initcall_from_entry(fn));
+		atomic_inc(&qkx_initcall_progress);
+		qkx_force_watchdog_off();
+		qkx_index++;
+	}
 }
 
 static void __init do_initcalls(void)
@@ -992,12 +1282,18 @@ static void __init do_initcalls(void)
  */
 static void __init do_basic_setup(void)
 {
+	qkx_note_phase(-1, 0, "cpuset_init_smp");
 	cpuset_init_smp();
+	qkx_note_phase(-1, 1, "shmem_init");
 	shmem_init();
+	qkx_note_phase(-1, 2, "driver_init");
 	driver_init();
+	qkx_note_phase(-1, 3, "init_irq_proc");
 	init_irq_proc();
+	qkx_note_phase(-1, 4, "do_ctors");
 	do_ctors();
 	usermodehelper_enable();
+	qkx_note_phase(-1, 5, "do_initcalls");
 	do_initcalls();
 }
 
@@ -1141,6 +1437,8 @@ static noinline void __init kernel_init_freeable(void)
 	 */
 	wait_for_completion(&kthreadd_done);
 
+	qkx_note_phase(-1, 100, "kthreadd_done");
+
 	/* Now the scheduler is fully set up and can do blocking allocations */
 	gfp_allowed_mask = __GFP_BITS_MASK;
 
@@ -1153,23 +1451,31 @@ static noinline void __init kernel_init_freeable(void)
 
 	smp_prepare_cpus(setup_max_cpus);
 
+	qkx_note_phase(-1, 101, "workqueue_init");
 	workqueue_init();
-
+	qkx_note_phase(-1, 102, "init_mm_internals");
 	init_mm_internals();
-
+	qkx_note_phase(-1, 103, "do_pre_smp_initcalls");
 	do_pre_smp_initcalls();
+	qkx_note_phase(-1, 104, "lockup_detector_init");
 	lockup_detector_init();
-
+	qkx_note_phase(-1, 105, "smp_init");
 	smp_init();
+	qkx_note_phase(-1, 106, "sched_init_smp");
 	sched_init_smp();
+	qkx_start_boot_watchdog();
 
+	qkx_note_phase(-1, 107, "page_alloc_init_late");
 	page_alloc_init_late();
 	/* Initialize page ext after all struct pages are initialized. */
+	qkx_note_phase(-1, 108, "page_ext_init");
 	page_ext_init();
 
+	qkx_note_phase(-1, 109, "do_basic_setup");
 	do_basic_setup();
 
 	/* Open the /dev/console on the rootfs, this should never fail */
+	qkx_note_phase(-1, 110, "open_console");
 	if (ksys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
 		pr_err("Warning: unable to open an initial console.\n");
 
@@ -1186,6 +1492,7 @@ static noinline void __init kernel_init_freeable(void)
 	if (ksys_access((const char __user *)
 			ramdisk_execute_command, 0) != 0) {
 		ramdisk_execute_command = NULL;
+		qkx_note_phase(-1, 111, "prepare_namespace");
 		prepare_namespace();
 	}
 
@@ -1198,6 +1505,12 @@ static noinline void __init kernel_init_freeable(void)
 	 * and default modules
 	 */
 
+	qkx_note_phase(-1, 112, "integrity_load_keys");
 	integrity_load_keys();
+	qkx_note_phase(-1, 113, "load_default_modules");
 	load_default_modules();
+
+	if (!proc_create("qkx_bootdone", 0220, NULL, &qkx_bootdone_fops))
+		pr_warn("QKX: failed to create /proc/qkx_bootdone\n");
+	qkx_note_phase(99, 0, "userspace-init");
 }

@@ -842,14 +842,17 @@ static int gdsc_get_resources(struct gdsc *sc, struct platform_device *pdev)
 
 		sc->bus_handle = msm_bus_scale_register_client(sc->bus_pdata);
 		if (!sc->bus_handle) {
-			dev_err(&pdev->dev, "Failed to register bus client\n");
 			/*
-			 * msm_bus_scale_register_client() returns 0 for all
-			 * errors including when called before the bus driver
-			 * probes.  Therefore, return -EPROBE_DEFER here so that
-			 * probing can be retried and this case handled.
+			 * qkx: msm_bus does not reliably reprobe after kexec and
+			 * deferred-probe retries are disabled in this diagnostic
+			 * kernel. Returning -EPROBE_DEFER here permanently removes
+			 * GDSCs such as mdss_core_gdsc, preventing SDE RSC and DRM
+			 * from probing. All bus operations below already guard a
+			 * zero handle, so retain the inherited interconnect state
+			 * and continue without an explicit vote.
 			 */
-			return -EPROBE_DEFER;
+			dev_warn(&pdev->dev,
+				 "qkx: bus client unavailable; continuing without bus scaling\n");
 		}
 	}
 

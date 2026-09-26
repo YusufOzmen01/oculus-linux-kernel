@@ -299,38 +299,17 @@ void cpufreq_stats_record_transition(struct cpufreq_policy *policy,
 	stats->total_trans++;
 }
 
+/*
+ * QKX: the vendor per-cpu idle/busy time-in-state accounting races
+ * against cpufreq_stats_create_table() on secondary CPUs (policy stats are
+ * published before the tables are fully coherent), causing NULL derefs in
+ * the idle path.  The accounting is pure diagnostics; disable it for the
+ * kexec diagnostic kernel.
+ */
 void cpufreq_stats_update_busy_time(struct task_struct *p, u64 cputime)
 {
-	struct cpufreq_policy *policy;
-	unsigned long flags;
-	unsigned int cpu;
-
-	cpu = task_cpu(p);
-	policy = cpufreq_cpu_get(cpu);
-	if (policy) {
-		if (policy->stats && !is_idle_task(p)) {
-			spin_lock_irqsave(&cpufreq_stats_lock, flags);
-			policy->stats->busy_time_in_state_per_cpu[cpu - policy->stats->cpu][policy->stats->last_index] += cputime;
-			spin_unlock_irqrestore(&cpufreq_stats_lock, flags);
-		}
-		cpufreq_cpu_put(policy);
-	}
 }
 
 void cpufreq_stats_update_idle_time(u64 cputime)
 {
-	struct cpufreq_policy *policy;
-	unsigned long flags;
-	unsigned int cpu;
-
-	cpu = smp_processor_id();
-	policy = cpufreq_cpu_get(cpu);
-	if (policy) {
-		if (policy->stats) {
-			spin_lock_irqsave(&cpufreq_stats_lock, flags);
-			policy->stats->idle_time_in_state_per_cpu[cpu - policy->stats->cpu][policy->stats->last_index] += cputime;
-			spin_unlock_irqrestore(&cpufreq_stats_lock, flags);
-		}
-		cpufreq_cpu_put(policy);
-	}
 }

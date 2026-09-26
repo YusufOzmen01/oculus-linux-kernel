@@ -39,6 +39,45 @@
 	((vote_y & BCM_TCS_CMD_VOTE_MASK) << BCM_TCS_CMD_VOTE_Y_SHFT))
 
 static int msm_bus_dev_init_qos(struct device *dev, void *data);
+
+/*
+ * qkx: init_qos bisection. qkx_bus_qos_skip bits: 1 skip BCM votes,
+ * 2 skip QoS clocks, 4 skip QoS MMIO programming. qkx_bus_qos_max limits
+ * how many nodes get the full sequence (-1 = unlimited); later nodes are
+ * treated as bypass_qos_prg.
+ */
+static int qkx_bus_qos_skip;
+core_param(qkx_bus_qos_skip, qkx_bus_qos_skip, int, 0444);
+static int qkx_bus_qos_max = -1;
+core_param(qkx_bus_qos_max, qkx_bus_qos_max, int, 0444);
+static int qkx_bus_qos_count;
+/*
+ * Comma-separated node ids whose QoS programming is skipped.
+ *
+ * Default 122 (mas-xm-ufs-card): Quest Pro has no UFS card. On a cold boot
+ * the bootloader leaves that aggre2_noc port clocked, so the early QoS write
+ * is harmless; after kexec the previous kernel's clk_disable_unused has
+ * gated it, and the unclocked NoC QoS write hard-resets the SoC (PMIC cold
+ * reset). Unlike usb3/ufs-mem, the DT gives this port no qos clock to enable
+ * first, so skip it.
+ */
+static char *qkx_bus_qos_skipids = "122";
+core_param(qkx_bus_qos_skipids, qkx_bus_qos_skipids, charp, 0444);
+
+static bool qkx_bus_qos_skipped(int id)
+{
+	const char *p = qkx_bus_qos_skipids;
+	int v;
+
+	while (p && *p) {
+		if (sscanf(p, "%d", &v) == 1 && v == id)
+			return true;
+		p = strchr(p, ',');
+		if (p)
+			p++;
+	}
+	return false;
+}
 static int msm_bus_dev_sbm_config(struct device *dev, bool enable);
 
 static struct list_head bcm_query_list_inorder[VCD_MAX_CNT];
@@ -629,7 +668,9 @@ int msm_bus_commit_data(struct list_head *clist)
 	tcs_cmd_n_shrink(n_wake);
 	tcs_cmd_n_shrink(n_sleep);
 
+	pr_emerg("qkxbus: commit rsc invalidate\n");
 	ret = rpmh_invalidate(cur_mbox);
+	pr_emerg("qkxbus: commit invalidate ret=%d\n", ret);
 	if (ret)
 		MSM_BUS_ERR("%s: Error invalidating mbox: %d\n",
 						__func__, ret);
@@ -668,6 +709,8 @@ int msm_bus_commit_data(struct list_head *clist)
 							__func__, ret);
 	}
 
+	pr_emerg("qkxbus: commit rsc=%d writes done ret=%d n=%d\n",
+		 cur_rsc->node_info->id, ret, n_active[0]);
 	list_for_each_entry_safe(node, node_tmp, clist, link) {
 		if (unlikely(node->node_info->defer_qos))
 			msm_bus_dev_init_qos(&node->dev, NULL);
@@ -988,9 +1031,26 @@ static int msm_bus_dev_init_qos(struct device *dev, void *data)
 			if (node_dev->ap_owned) {
 				if (bus_node_info->fabdev->bypass_qos_prg)
 					goto exit_init_qos;
+				if (qkx_bus_qos_max >= 0 &&
+				    qkx_bus_qos_count >= qkx_bus_qos_max)
+					goto exit_init_qos;
+				qkx_bus_qos_count++;
+				if (qkx_bus_qos_skipped(node_dev->node_info->id)) {
+					pr_emerg("qkxbus: qos node %d skipped\n",
+						 node_dev->node_info->id);
+					goto exit_init_qos;
+				}
 
-				ret = msm_bus_vote_qos_bcms(node_dev);
-				ret = msm_bus_enable_node_qos_clk(node_dev);
+				pr_emerg("qkxbus: qos #%d node %d vote\n",
+					 qkx_bus_qos_count,
+					 node_dev->node_info->id);
+				ret = 0;
+				if (!(qkx_bus_qos_skip & 1))
+					ret = msm_bus_vote_qos_bcms(node_dev);
+				pr_emerg("qkxbus: qos node %d vote ret=%d clk\n",
+					 node_dev->node_info->id, ret);
+				if (!(qkx_bus_qos_skip & 2))
+					ret = msm_bus_enable_node_qos_clk(node_dev);
 				if (ret < 0) {
 					MSM_BUS_DBG("Can't Enable QoS clk %d\n",
 					node_dev->node_info->id);
@@ -998,14 +1058,24 @@ static int msm_bus_dev_init_qos(struct device *dev, void *data)
 					goto exit_init_qos;
 				}
 
-				bus_node_info->fabdev->noc_ops.qos_init(
+				pr_emerg("qkxbus: qos node %d mmio base=%pK off=%x qoff=%x\n",
+					 node_dev->node_info->id,
+					 bus_node_info->fabdev->qos_base,
+					 bus_node_info->fabdev->base_offset,
+					 bus_node_info->fabdev->qos_off);
+				if (!(qkx_bus_qos_skip & 4))
+					bus_node_info->fabdev->noc_ops.qos_init(
 					node_dev,
 					bus_node_info->fabdev->qos_base,
 					bus_node_info->fabdev->base_offset,
 					bus_node_info->fabdev->qos_off,
 					bus_node_info->fabdev->qos_freq);
-				ret = msm_bus_disable_node_qos_clk(node_dev);
-				ret = msm_bus_rm_vote_qos_bcms(node_dev);
+				pr_emerg("qkxbus: qos node %d mmio done\n",
+					 node_dev->node_info->id);
+				if (!(qkx_bus_qos_skip & 2))
+					ret = msm_bus_disable_node_qos_clk(node_dev);
+				if (!(qkx_bus_qos_skip & 1))
+					ret = msm_bus_rm_vote_qos_bcms(node_dev);
 				node_dev->node_info->defer_qos = false;
 			}
 		} else
@@ -1797,12 +1867,31 @@ int msm_bus_device_remove(struct platform_device *pdev)
 	return 0;
 }
 
+/*
+ * qkx: bisection aid for the post-kexec hard reset triggered by this probe.
+ * qkx_bus_stop=N makes the probe return early at phase N:
+ *   1 probe entry, 2 after node/clk init, 3 after dev_conn/postcon,
+ *   4 after init_qos (skips late_init commit); 0 runs everything.
+ */
+static int qkx_bus_stop;
+core_param(qkx_bus_stop, qkx_bus_stop, int, 0444);
+static bool qkx_bus_probed;
+
+#define QKX_BUS_STOP(n) do {						\
+	pr_emerg("qkxbus: phase %d reached\n", n);			\
+	if (qkx_bus_stop == (n)) {					\
+		pr_emerg("qkxbus: stopping at phase %d\n", n);		\
+		return -ENODEV;						\
+	}								\
+} while (0)
+
 static int msm_bus_device_probe(struct platform_device *pdev)
 {
 	unsigned int i = 1, ret;
 	struct msm_bus_device_node_registration *pdata;
 
 	MSM_BUS_ERR("msm_bus: Probe started");
+	QKX_BUS_STOP(1);
 	/* If possible, get pdata from device-tree */
 	if (pdev->dev.of_node)
 		pdata = msm_bus_of_to_pdata(pdev);
@@ -1866,6 +1955,8 @@ static int msm_bus_device_probe(struct platform_device *pdev)
 		}
 	}
 
+	QKX_BUS_STOP(2);
+	pr_emerg("qkxbus: phase dev_conn (%d nodes)\n", pdata->num_devices);
 	ret = bus_for_each_dev(&msm_bus_type, NULL, NULL,
 						msm_bus_setup_dev_conn);
 	if (ret) {
@@ -1873,6 +1964,7 @@ static int msm_bus_device_probe(struct platform_device *pdev)
 		goto exit_device_probe;
 	}
 
+	pr_emerg("qkxbus: phase postcon\n");
 	ret = bus_for_each_dev(&msm_bus_type, NULL, NULL,
 						msm_bus_postcon_setup);
 	if (ret) {
@@ -1885,7 +1977,13 @@ static int msm_bus_device_probe(struct platform_device *pdev)
 	 * defer QoS programming to the first transaction in cases of failure
 	 * and we want to continue the probe.
 	 */
+	QKX_BUS_STOP(3);
+	pr_emerg("qkxbus: phase init_qos\n");
 	ret = bus_for_each_dev(&msm_bus_type, NULL, NULL, msm_bus_dev_init_qos);
+	pr_emerg("qkxbus: phase init_qos done (%d nodes programmed)\n",
+		 qkx_bus_qos_count);
+	QKX_BUS_STOP(4);
+	qkx_bus_probed = true;
 
 	/* Register the arb layer ops */
 	msm_bus_arb_setops_adhoc(&arb_ops);
@@ -2035,6 +2133,11 @@ int __init msm_bus_device_init_driver(void)
 
 int __init msm_bus_device_late_init(void)
 {
+	if (!qkx_bus_probed) {
+		pr_emerg("qkxbus: probe incomplete; skipping late_init commit\n");
+		return 0;
+	}
+	pr_emerg("qkxbus: late_init commit\n");
 	commit_late_init_data(true);
 	MSM_BUS_ERR("msm_bus_late_init: Remove handoff bw requests\n");
 	init_time = false;
