@@ -491,6 +491,16 @@ static void cleanup_irq(struct spmi_pmic_arb *pmic_arb, u16 apid, int id)
 	dev_err_ratelimited(&pmic_arb->spmic->dev, "%s apid=%d sid=0x%x per=0x%x irq=%d\n",
 			__func__, apid, sid, per, id);
 	writel_relaxed(irq_mask, pmic_arb->ver_ops->irq_clear(pmic_arb, apid));
+	/* qkx: Android leaves interrupts enabled in peripherals whose driver
+	 * has not probed yet after kexec. Clearing alone lets a level source
+	 * refire forever, so also disable it at the peripheral; the owning
+	 * driver re-enables it through request_irq().
+	 */
+	if (pmic_arb_write_cmd(pmic_arb->spmic, SPMI_CMD_EXT_WRITEL, sid,
+			       (per << 8) + QPNPINT_REG_EN_CLR, &irq_mask, 1))
+		dev_err_ratelimited(&pmic_arb->spmic->dev,
+				    "failed to disable irq sid=0x%x per=0x%x irq=%d\n",
+				    sid, per, id);
 }
 
 static void periph_interrupt(struct spmi_pmic_arb *pmic_arb, u16 apid)

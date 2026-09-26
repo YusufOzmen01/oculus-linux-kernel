@@ -208,7 +208,8 @@ bool qkx_probe_trace;
 static char *qkx_probe_skip =
 	"c440000.qcom,spmi:qcom,pm8150b@2:qcom,qpnp-smb5|"
 	"ac4d000.qcom,cpas-cdm0";
-core_param(qkx_probe_skip, qkx_probe_skip, charp, 0444);
+/* Writable so a parked device can be released after USB logging is up. */
+core_param(qkx_probe_skip, qkx_probe_skip, charp, 0644);
 
 static bool qkx_probe_is_skipped(const char *name)
 {
