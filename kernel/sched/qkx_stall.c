@@ -27,6 +27,7 @@
 #include <linux/qkx_diag.h>
 #include <linux/smp.h>
 #include <linux/io.h>
+#include <linux/export.h>
 #include <linux/moduleparam.h>
 #include <asm/irq_regs.h>
 #include <asm/sysreg.h>
@@ -57,6 +58,7 @@ DEFINE_PER_CPU(struct qkx_lockwait, qkx_lockwait);
 DEFINE_PER_CPU(struct qkx_ctx, qkx_ctx[QKX_CTX_NR]);
 struct qkx_ctxarea __iomem *qkx_ctxarea;
 bool qkx_irqmask_ready;
+EXPORT_SYMBOL(qkx_irqmask_ready);
 static DEFINE_PER_CPU(bool, qkx_irqmask_busy);
 static DEFINE_PER_CPU(struct qkx_ctx, qkx_irqmask_save);
 struct qkx_mmio_state {
@@ -103,12 +105,14 @@ void notrace qkx_mmio_enter(const void *addr, const void *caller, bool write)
 	m->write = write;
 	m->since = ktime_get_mono_fast_ns();
 }
+EXPORT_SYMBOL(qkx_mmio_enter);
 
 void notrace qkx_mmio_exit(void)
 {
 	if (READ_ONCE(qkx_irqmask_ready))
 		this_cpu_write(qkx_mmio.busy, false);
 }
+EXPORT_SYMBOL(qkx_mmio_exit);
 
 void notrace qkx_irqmask_note(bool disabled, const void *caller)
 {
@@ -129,6 +133,7 @@ void notrace qkx_irqmask_note(bool disabled, const void *caller)
 	}
 	this_cpu_write(qkx_irqmask_busy, false);
 }
+EXPORT_SYMBOL(qkx_irqmask_note);
 
 static void notrace qkx_ctx_mirror(int kind, const struct qkx_ctx *c)
 {
