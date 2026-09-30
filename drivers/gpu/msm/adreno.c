@@ -1556,7 +1556,7 @@ static int adreno_probe(struct platform_device *pdev)
 
 	of_id = of_match_device(adreno_match_table, &pdev->dev);
 	if (!of_id)
-		return -EINVAL;
+		{ int __r = (-EINVAL); dev_err(&pdev->dev, "qkx: adreno_probe exit 1 line %d ret=%d\n", __LINE__, __r); return __r; }
 
 	adreno_dev = (struct adreno_device *) of_id->data;
 
@@ -1569,7 +1569,7 @@ static int adreno_probe(struct platform_device *pdev)
 
 	if (adreno_is_gpu_disabled(adreno_dev)) {
 		dev_err(&pdev->dev, "adreno: GPU is disabled on this device\n");
-		return -ENODEV;
+		{ int __r = (-ENODEV); dev_err(&pdev->dev, "qkx: adreno_probe exit 2 line %d ret=%d\n", __LINE__, __r); return __r; }
 	}
 
 	/* Identify SOC hardware revision to be used */
@@ -1579,7 +1579,7 @@ static int adreno_probe(struct platform_device *pdev)
 
 	status = adreno_probe_efuse(pdev, adreno_dev);
 	if (status)
-		return status;
+		{ int __r = (status); dev_err(&pdev->dev, "qkx: adreno_probe exit 3 line %d ret=%d\n", __LINE__, __r); return __r; }
 
 	/* Allow overriding the speed bin via device tree. */
 	if (!of_property_read_u32(pdev->dev.of_node, "oculus,force-speed-bin",
@@ -1588,12 +1588,12 @@ static int adreno_probe(struct platform_device *pdev)
 
 	/* Get the chip ID from the DT and set up target specific parameters */
 	if (adreno_identify_gpu(adreno_dev))
-		return -ENODEV;
+		{ int __r = (-ENODEV); dev_err(&pdev->dev, "qkx: adreno_probe exit 4 line %d ret=%d\n", __LINE__, __r); return __r; }
 
 	status = adreno_of_get_power(adreno_dev, pdev);
 	if (status) {
 		device->pdev = NULL;
-		return status;
+		{ int __r = (status); dev_err(&pdev->dev, "qkx: adreno_probe exit 5 line %d ret=%d\n", __LINE__, __r); return __r; }
 	}
 
 	/*
@@ -1604,7 +1604,7 @@ static int adreno_probe(struct platform_device *pdev)
 	status = gmu_core_probe(device);
 	if (status) {
 		device->pdev = NULL;
-		return status;
+		{ int __r = (status); dev_err(&pdev->dev, "qkx: adreno_probe exit 6 line %d ret=%d\n", __LINE__, __r); return __r; }
 	}
 
 	/*
@@ -1644,7 +1644,7 @@ static int adreno_probe(struct platform_device *pdev)
 	status = kgsl_device_platform_probe(device);
 	if (status) {
 		device->pdev = NULL;
-		return status;
+		{ int __r = (status); dev_err(&pdev->dev, "qkx: adreno_probe exit 7 line %d ret=%d\n", __LINE__, __r); return __r; }
 	}
 
 	/* Probe for the optional CX_DBGC block */
@@ -1690,7 +1690,7 @@ static int adreno_probe(struct platform_device *pdev)
 	if (status) {
 		kgsl_device_platform_remove(device);
 		device->pdev = NULL;
-		return status;
+		{ int __r = (status); dev_err(&pdev->dev, "qkx: adreno_probe exit 8 line %d ret=%d\n", __LINE__, __r); return __r; }
 	}
 
 	/* Initialize the snapshot engine */
@@ -1734,7 +1734,7 @@ static int adreno_probe(struct platform_device *pdev)
 	}
 #endif
 
-	return 0;
+	{ int __r = (0); dev_err(&pdev->dev, "qkx: adreno_probe exit 9 line %d ret=%d\n", __LINE__, __r); return __r; }
 }
 
 static void _adreno_free_memories(struct adreno_device *adreno_dev)

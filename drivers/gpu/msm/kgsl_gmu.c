@@ -9,6 +9,7 @@
 #include <linux/io.h>
 #include <linux/iommu.h>
 #include <linux/msm-bus.h>
+#include <linux/module.h>
 #include <linux/of_platform.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
@@ -21,6 +22,11 @@
 
 #undef MODULE_PARAM_PREFIX
 #define MODULE_PARAM_PREFIX "kgsl."
+
+static bool qkx_skip_gmu_bw_vote;
+module_param_named(qkx_skip_gmu_bw_vote, qkx_skip_gmu_bw_vote, bool, 0644);
+MODULE_PARM_DESC(qkx_skip_gmu_bw_vote,
+	"Keep the established GMU bandwidth vote and skip runtime BW HFI votes");
 
 struct gmu_iommu_context {
 	const char *name;
@@ -528,6 +534,24 @@ static int gmu_dcvs_set(struct kgsl_device *device,
 
 	if (bus_level < gmu->num_bwlevels && bus_level > 0)
 		req.bw = bus_level;
+
+	/*
+	 * Diagnostic kexec fallback: inherited AOP/GMU state on Kona can leave
+	 * the GMU firmware unable to acknowledge runtime bandwidth-only HFI
+	 * votes even though startup, frequency votes and GPU execution work.
+	 * Retain the last successfully established bandwidth vote rather than
+	 * faulting and permanently stalling the GPU SMMU.
+	 */
+	if (qkx_skip_gmu_bw_vote &&
+	    test_bit(ADRENO_DEVICE_STARTED, &adreno_dev->priv)) {
+		/*
+		 * Diagnostic kexec fallback: permit the complete first-boot DCVS
+		 * handshake, then retain that operating point. Real interconnect
+		 * bandwidth is pinned through the CPU-side gpubw devfreq device.
+		 */
+		clear_bit(GMU_DCVS_REPLAY, &device->gmu_core.flags);
+		return 0;
+	}
 
 	/* GMU will vote for slumber levels through the sleep sequence */
 	if ((req.freq == INVALID_DCVS_IDX) &&
@@ -1300,17 +1324,17 @@ static int gmu_probe(struct kgsl_device *device, struct device_node *node)
 	/* Set up GMU regulators */
 	ret = gmu_regulators_probe(gmu, node);
 	if (ret)
-		goto error;
+		{ pr_err("qkx: gmu_probe fail line %d ret=%d\n", __LINE__, ret); goto error; }
 
 	/* Set up GMU clocks */
 	ret = gmu_clocks_probe(gmu, node);
 	if (ret)
-		goto error;
+		{ pr_err("qkx: gmu_probe fail line %d ret=%d\n", __LINE__, ret); goto error; }
 
 	/* Set up GMU IOMMU and shared memory with GMU */
 	ret = gmu_iommu_init(gmu, node);
 	if (ret)
-		goto error;
+		{ pr_err("qkx: gmu_probe fail line %d ret=%d\n", __LINE__, ret); goto error; }
 
 	if (adreno_is_a650_family(adreno_dev))
 		gmu->vma = gmu_vma;
@@ -1319,12 +1343,12 @@ static int gmu_probe(struct kgsl_device *device, struct device_node *node)
 
 	ret = gmu_tcm_init(gmu);
 	if (ret)
-		goto error;
+		{ pr_err("qkx: gmu_probe fail line %d ret=%d\n", __LINE__, ret); goto error; }
 
 	/* Map and reserve GMU CSRs registers */
 	ret = gmu_reg_probe(device);
 	if (ret)
-		goto error;
+		{ pr_err("qkx: gmu_probe fail line %d ret=%d\n", __LINE__, ret); goto error; }
 
 	device->gmu_core.gmu2gpu_offset =
 			(gmu->reg_phys - device->reg_phys) >> 2;
@@ -1334,13 +1358,13 @@ static int gmu_probe(struct kgsl_device *device, struct device_node *node)
 	ret = kgsl_request_irq(gmu->pdev, "kgsl_hfi_irq",
 			hfi_irq_handler, device);
 	if (ret < 0)
-		goto error;
+		{ pr_err("qkx: gmu_probe fail line %d ret=%d\n", __LINE__, ret); goto error; }
 	hfi->hfi_interrupt_num = ret;
 
 	ret = kgsl_request_irq(gmu->pdev, "kgsl_gmu_irq",
 			gmu_irq_handler, device);
 	if (ret < 0)
-		goto error;
+		{ pr_err("qkx: gmu_probe fail line %d ret=%d\n", __LINE__, ret); goto error; }
 	gmu->gmu_interrupt_num = ret;
 
 	/* Don't enable GMU interrupts until GMU started */
@@ -1363,17 +1387,17 @@ static int gmu_probe(struct kgsl_device *device, struct device_node *node)
 	/* Initializes GPU b/w levels configuration */
 	ret = gmu_gpu_bw_probe(device, gmu);
 	if (ret)
-		goto error;
+		{ pr_err("qkx: gmu_probe fail line %d ret=%d\n", __LINE__, ret); goto error; }
 
 	/* Initialize GMU CNOC b/w levels configuration */
 	ret = gmu_cnoc_bw_probe(gmu);
 	if (ret)
-		goto error;
+		{ pr_err("qkx: gmu_probe fail line %d ret=%d\n", __LINE__, ret); goto error; }
 
 	/* Populates RPMh configurations */
 	ret = gmu_rpmh_init(device, gmu, pwr);
 	if (ret)
-		goto error;
+		{ pr_err("qkx: gmu_probe fail line %d ret=%d\n", __LINE__, ret); goto error; }
 
 	/* Set up GMU idle states */
 	if (ADRENO_FEATURE(adreno_dev, ADRENO_MIN_VOLT))

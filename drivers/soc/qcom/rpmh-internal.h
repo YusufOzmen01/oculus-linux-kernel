@@ -109,6 +109,7 @@ struct rsc_drv {
 	struct rpmh_ctrlr client;
 	int irq;
 	void *ipc_log_ctx;
+	u64 qkx_done;
 };
 
 extern bool rpmh_standalone;

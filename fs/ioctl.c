@@ -5,6 +5,7 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
+#include <linux/qkx_diag.h>
 #include <linux/syscalls.h>
 #include <linux/mm.h>
 #include <linux/capability.h>
@@ -43,7 +44,18 @@ long vfs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	if (!filp->f_op->unlocked_ioctl)
 		goto out;
 
-	error = filp->f_op->unlocked_ioctl(filp, cmd, arg);
+	if (qkx_stallmon) {
+		struct qkx_attr_save save;
+		char what[32];
+
+		scnprintf(what, sizeof(what), "ioctl:%s:%08x",
+			 filp->f_path.dentry->d_name.name, cmd);
+		qkx_attr_enter(&save, filp->f_op->unlocked_ioctl, what);
+		error = filp->f_op->unlocked_ioctl(filp, cmd, arg);
+		qkx_attr_exit(&save);
+	} else {
+		error = filp->f_op->unlocked_ioctl(filp, cmd, arg);
+	}
 	if (error == -ENOIOCTLCMD)
 		error = -ENOTTY;
  out:

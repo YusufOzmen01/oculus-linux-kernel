@@ -53,8 +53,12 @@ int gmu_core_probe(struct kgsl_device *device)
 			ADRENO_GPMU) ? BIT(GMU_GPMU) : 0;
 
 	for (i = 0; i < ARRAY_SIZE(gmu_subtypes); i++) {
-		node = of_find_compatible_node(device->pdev->dev.of_node,
-				NULL, gmu_subtypes[i].compat);
+		/* Search the whole tree: a device tree re-serialised from
+		 * /proc/device-tree (as for kexec) is ordered alphabetically, which
+		 * puts qcom,gmu before qcom,kgsl-3d0, so a search starting at the
+		 * GPU node never finds it. */
+		node = of_find_compatible_node(NULL, NULL,
+				gmu_subtypes[i].compat);
 
 		if (node != NULL) {
 			gmu_core_ops = gmu_subtypes[i].core_ops;

@@ -914,6 +914,13 @@ out:
 	return err;
 }
 
+static bool qkx_ufs_full_reset;
+static int __init qkx_ufs_full_reset_setup(char *s)
+{
+	return kstrtobool(s, &qkx_ufs_full_reset);
+}
+early_param("qkx_ufs_full_reset", qkx_ufs_full_reset_setup);
+
 static int ufs_qcom_full_reset(struct ufs_hba *hba)
 {
 	int ret = -ENOTSUPP;
@@ -2274,6 +2281,15 @@ static int ufs_qcom_init(struct ufs_hba *hba)
 
 	ufs_qcom_set_bus_vote(hba, true);
 	ufs_qcom_setup_clocks(hba, true, POST_CHANGE);
+
+	if (qkx_ufs_full_reset) {
+		err = ufs_qcom_full_reset(hba);
+		if (err) {
+			dev_err(dev, "qkx: inherited UFS core reset failed: %d\n", err);
+			goto out_set_load_vccq_parent;
+		}
+		dev_info(dev, "qkx: reset inherited UFS host/DMA state\n");
+	}
 
 	host->dbg_print_en |= UFS_QCOM_DEFAULT_DBG_PRINT_EN;
 	ufs_qcom_get_default_testbus_cfg(host);

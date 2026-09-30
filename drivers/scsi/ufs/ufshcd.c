@@ -3125,6 +3125,13 @@ int ufshcd_copy_query_response(struct ufs_hba *hba, struct ufshcd_lrb *lrbp)
 	return 0;
 }
 
+static bool qkx_ufs_noice;
+static int __init qkx_ufs_noice_setup(char *s)
+{
+	return kstrtobool(s, &qkx_ufs_noice);
+}
+early_param("qkx_ufs_noice", qkx_ufs_noice_setup);
+
 /**
  * ufshcd_hba_capabilities - Read controller capabilities
  * @hba: per adapter instance
@@ -3132,6 +3139,8 @@ int ufshcd_copy_query_response(struct ufs_hba *hba, struct ufshcd_lrb *lrbp)
 static inline void ufshcd_hba_capabilities(struct ufs_hba *hba)
 {
 	hba->capabilities = ufshcd_readl(hba, REG_CONTROLLER_CAPABILITIES);
+	if (qkx_ufs_noice)
+		hba->capabilities &= ~MASK_CRYPTO_SUPPORT;
 
 	/* nutrs and nutmrs are 0 based values */
 	hba->nutrs = (hba->capabilities & MASK_TRANSFER_REQUESTS_SLOTS) + 1;
@@ -11163,7 +11172,7 @@ int ufshcd_init(struct ufs_hba *hba, void __iomem *mmio_base, unsigned int irq)
 	if (hba->force_g4)
 		hba->phy_init_g4 = true;
 	/* Init crypto */
-	err = ufshcd_hba_init_crypto(hba);
+	err = qkx_ufs_noice ? 0 : ufshcd_hba_init_crypto(hba);
 	if (err) {
 		dev_err(hba->dev, "crypto setup failed\n");
 		goto out_remove_scsi_host;

@@ -5455,6 +5455,16 @@ static void regulator_init_complete_work_function(struct work_struct *work)
 static DECLARE_DELAYED_WORK(regulator_init_complete_work,
 			    regulator_init_complete_work_function);
 
+static bool qkx_skip_regulator_cleanup;
+
+static int __init qkx_skip_regulator_cleanup_setup(char *str)
+{
+	qkx_skip_regulator_cleanup = true;
+	return 0;
+}
+early_param("qkx_skip_regulator_cleanup",
+		qkx_skip_regulator_cleanup_setup);
+
 static int __init regulator_init_complete(void)
 {
 	/*
@@ -5477,8 +5487,11 @@ static int __init regulator_init_complete(void)
 	 * we'd only do this on systems that need it, and a kernel
 	 * command line option might be useful.
 	 */
-	schedule_delayed_work(&regulator_init_complete_work,
-			      msecs_to_jiffies(30000));
+	if (qkx_skip_regulator_cleanup)
+		pr_info("qkx: preserving inherited regulator votes; late cleanup disabled\n");
+	else
+		schedule_delayed_work(&regulator_init_complete_work,
+				      msecs_to_jiffies(30000));
 
 	class_for_each_device(&regulator_class, NULL, NULL,
 			      regulator_register_fill_coupling_array);

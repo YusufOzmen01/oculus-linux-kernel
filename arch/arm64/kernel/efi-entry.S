@@ -75,7 +75,7 @@ ENTRY(entry)
 	 * Flush the copied Image to the PoC, and ensure it is not shadowed by
 	 * stale icache entries from before relocation.
 	 */
-	bl	__flush_dcache_area
+	bl	__qkx_raw_flush_dcache_area
 	ic	ialluis
 
 	/*
@@ -87,7 +87,7 @@ ENTRY(entry)
 	adr	x0, entry
 	adr	x1, entry_end
 	sub	x1, x1, x0
-	bl	__flush_dcache_area
+	bl	__qkx_raw_flush_dcache_area
 
 	/* Turn off Dcache and MMU */
 	mrs	x0, CurrentEL

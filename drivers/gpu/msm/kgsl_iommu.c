@@ -12,6 +12,7 @@
 #include <linux/of_platform.h>
 #include <linux/seq_file.h>
 #include <linux/delay.h>
+#include <linux/kthread.h>
 #include <linux/random.h>
 #include <linux/mm_inline.h>
 #include <soc/qcom/scm.h>
@@ -721,6 +722,132 @@ static irqreturn_t kgsl_iommu_lpac_context_fault_thread(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static bool kgsl_iommu_latch_missed_fault(struct kgsl_iommu_context *ctx);
+static struct kgsl_pagetable *_get_pagetable_from_contextidr(
+		struct kgsl_mmu *mmu, u32 contextidr);
+
+/*
+ * qkx: the dispatcher can find the SMMU stalled on a fault that the fault
+ * handler never saw because its edge-triggered interrupt was missed. Dump each
+ * context bank, then hand any such fault to the fault thread.
+ */
+/*
+ * qkx: fast software replacement for the missing context-bank fault IRQ.
+ * Polls FSR every ~1ms while the GPU is awake and hands any latched fault to
+ * the normal threaded handler, instead of waiting for the dispatcher's
+ * multi-second hang timeout to notice via kgsl_iommu_qkx_dump_faults().
+ */
+static int kgsl_iommu_qkx_fault_poll(void *data)
+{
+	struct kgsl_mmu *mmu = data;
+	struct kgsl_iommu *iommu = _IOMMU_PRIV(mmu);
+	struct kgsl_iommu_context *ctxs[] = { &iommu->user_context,
+		&iommu->secure_context, &iommu->lpac_context };
+	struct kgsl_device *device = KGSL_MMU_DEVICE(mmu);
+
+	while (!kthread_should_stop()) {
+		int i;
+
+		if (!kgsl_state_is_awake(device)) {
+			msleep(20);
+			continue;
+		}
+
+		for (i = 0; i < ARRAY_SIZE(ctxs); i++) {
+			struct kgsl_iommu_context *ctx = ctxs[i];
+
+			if (!ctx->regbase || ctx->irq <= 0)
+				continue;
+			if (kgsl_iommu_latch_missed_fault(ctx))
+				irq_wake_thread(ctx->irq, ctx);
+		}
+
+		usleep_range(1000, 1500);
+	}
+
+	return 0;
+}
+
+void kgsl_iommu_qkx_dump_faults(struct kgsl_mmu *mmu)
+{
+	struct kgsl_iommu *iommu = _IOMMU_PRIV(mmu);
+	struct kgsl_iommu_context *ctxs[] = { &iommu->user_context,
+		&iommu->secure_context, &iommu->lpac_context };
+	struct kgsl_device *device = KGSL_MMU_DEVICE(mmu);
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ctxs); i++) {
+		struct kgsl_iommu_context *ctx = ctxs[i];
+		bool pending = false, active = false;
+
+		if (!ctx->regbase)
+			continue;
+		if (ctx->irq > 0) {
+			irq_get_irqchip_state(ctx->irq, IRQCHIP_STATE_PENDING,
+				&pending);
+			irq_get_irqchip_state(ctx->irq, IRQCHIP_STATE_ACTIVE,
+				&active);
+		}
+		dev_err(device->dev,
+			"qkx: cb%d %s irq %d pend %d act %d out %d sctlr 0x%x fsr 0x%x far 0x%llx fsynr0 0x%x fsynr1 0x%x cidr 0x%x\n",
+			ctx->cb_num, ctx->name, ctx->irq, pending, active,
+			atomic_read(&ctx->outstanding_fault_count),
+			KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_SCTLR),
+			KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_FSR),
+			KGSL_IOMMU_GET_CTX_REG_Q(ctx, KGSL_IOMMU_CTX_FAR),
+			KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_FSYNR0),
+			KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_FSYNR1),
+			KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_CONTEXTIDR));
+
+		/*
+		 * qkx: identify whatever the faulting address actually points at,
+		 * to tell a genuine unmapped/invalid access apart from a fault this
+		 * process's own recovery should have already cleared.
+		 */
+		{
+			u32 cidr = KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_CONTEXTIDR);
+			u64 far = KGSL_IOMMU_GET_CTX_REG_Q(ctx, KGSL_IOMMU_CTX_FAR);
+			struct kgsl_pagetable *fpt = _get_pagetable_from_contextidr(mmu, cidr);
+
+			if (fpt) {
+				struct kgsl_process_private *fpriv = fpt->proc_priv;
+				struct kgsl_mem_entry *me = fpriv ?
+					kgsl_sharedmem_find(fpriv, far) : NULL;
+
+				if (me) {
+					dev_err(device->dev,
+						"qkx: cb%d far 0x%llx pid %d (%s) is entry id %u gpuaddr 0x%llx size 0x%llx flags 0x%llx priv 0x%x off 0x%llx%s%s\n",
+						ctx->cb_num, far, pid_nr(fpriv->pid), fpriv->comm,
+						me->id, me->memdesc.gpuaddr, me->memdesc.size,
+						me->memdesc.flags, me->memdesc.priv,
+						far - me->memdesc.gpuaddr,
+#if IS_ENABLED(CONFIG_QCOM_KGSL_ENTRY_METADATA)
+						me->metadata ? " meta " : "",
+						me->metadata ? me->metadata : ""
+#else
+						"", ""
+#endif
+						);
+					kgsl_mem_entry_put(me);
+				} else if (fpriv) {
+					dev_err(device->dev,
+						"qkx: cb%d far 0x%llx has no entry in pid %d (%s)\n",
+						ctx->cb_num, far, pid_nr(fpriv->pid),
+						fpriv->comm);
+				}
+				kgsl_mmu_putpagetable(fpt);
+			}
+		}
+
+		if (ctx->irq > 0 && !pending && !active &&
+				kgsl_iommu_latch_missed_fault(ctx)) {
+			dev_err(device->dev, "qkx: cb%d fault had no interrupt; handling it\n",
+				ctx->cb_num);
+			irq_wake_thread(ctx->irq, ctx);
+		}
+	}
+}
+
 struct kgsl_pagefault_log {
 	struct work_struct work;
 	struct kgsl_mmu *mmu;
@@ -1104,16 +1231,51 @@ static irqreturn_t kgsl_iommu_context_fault_isr(int irq, void *data)
 /* Wait a while after our last reported fault before sleeping the thread. */
 #define BUSY_WAIT_CYCLES 192 /* ~10 us @ 19.2 MHz */
 
+/*
+ * The context fault interrupt is edge triggered. A fault that latches while
+ * the line is still high from the previous one, e.g. the next lazy page of a
+ * transaction resumed just before, raises no new edge and would leave the SMMU
+ * stalled forever. Pick such a fault up from FSR the way the ISR would.
+ */
+static bool kgsl_iommu_latch_missed_fault(struct kgsl_iommu_context *ctx)
+{
+	const struct kgsl_mmu *mmu = &ctx->kgsldev->mmu;
+	unsigned long flags;
+	bool latched = false;
+	u64 iova;
+
+	spin_lock_irqsave(&ctx->fault_lock, flags);
+	if (!atomic_read(&ctx->outstanding_fault_count) &&
+			(KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_FSR) &
+			 FSR_FAULT)) {
+		iova = KGSL_IOMMU_GET_CTX_REG_Q(ctx, KGSL_IOMMU_CTX_FAR);
+		if (test_bit(KGSL_MMU_SPLIT_TABLES_GC, &mmu->features))
+			iova = sign_extend64(iova, KGSL_IOMMU_IAS);
+		ctx->fault_regs.addr = iova;
+		ctx->fault_regs.contextidr = KGSL_IOMMU_GET_CTX_REG(ctx,
+				KGSL_IOMMU_CTX_CONTEXTIDR);
+		atomic_inc(&ctx->outstanding_fault_count);
+		latched = true;
+	}
+	spin_unlock_irqrestore(&ctx->fault_lock, flags);
+
+	return latched;
+}
+
+/* Bound on faults picked up without an interrupt in one thread wakeup. */
+#define MAX_MISSED_FAULTS 256
+
 static irqreturn_t kgsl_iommu_context_fault_thread(int irq, void *data)
 {
 	struct kgsl_iommu_context *ctx = data;
 	struct kgsl_iommu_fault_regs fault_regs;
 	cycles_t wait_start;
 	unsigned long flags;
-	int ret;
+	int ret, missed = 0;
 	const bool stall_on_fault = test_bit(KGSL_FT_PAGEFAULT_STALL_ENABLE,
 			&ADRENO_DEVICE(ctx->kgsldev)->ft_pf_policy);
 
+again:
 	spin_lock_irqsave(&ctx->fault_lock, flags);
 	memcpy(&fault_regs, &ctx->fault_regs, sizeof(fault_regs));
 	atomic_dec(&ctx->outstanding_fault_count);
@@ -1151,6 +1313,12 @@ static irqreturn_t kgsl_iommu_context_fault_thread(int irq, void *data)
 
 		/* Take a nap. */
 		cpu_relax();
+	}
+
+	if (stall_on_fault && ret != -EBUSY && missed < MAX_MISSED_FAULTS &&
+			kgsl_iommu_latch_missed_fault(ctx)) {
+		missed++;
+		goto again;
 	}
 
 	return IRQ_HANDLED;
@@ -2031,6 +2199,11 @@ static void kgsl_iommu_suspend(struct kgsl_mmu *mmu)
 static void kgsl_iommu_close(struct kgsl_mmu *mmu)
 {
 	struct kgsl_iommu *iommu = _IOMMU_PRIV(mmu);
+
+	if (iommu->qkx_fault_poll_task) {
+		kthread_stop(iommu->qkx_fault_poll_task);
+		iommu->qkx_fault_poll_task = NULL;
+	}
 
 	/* Remove the extra power vote we took on probe. */
 	kgsl_iommu_suspend(mmu);
@@ -3292,6 +3465,13 @@ int kgsl_iommu_probe(struct kgsl_device *device)
 
 	device->qtimer_desc = kgsl_allocate_global_fixed(device,
 		"qcom,gpu-timer", "gpu-qtimer");
+
+	iommu->qkx_fault_poll_task = kthread_run(kgsl_iommu_qkx_fault_poll,
+		mmu, "kgsl_qkx_fpoll");
+	if (IS_ERR(iommu->qkx_fault_poll_task)) {
+		dev_err(device->dev, "qkx: failed to start fault poll thread\n");
+		iommu->qkx_fault_poll_task = NULL;
+	}
 
 	return 0;
 

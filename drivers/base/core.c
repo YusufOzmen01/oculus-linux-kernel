@@ -26,6 +26,7 @@
 #include <linux/netdevice.h>
 #include <linux/sched/signal.h>
 #include <linux/sysfs.h>
+#include <linux/qkx_diag.h>
 
 #include "base.h"
 #include "power/power.h"
@@ -1394,8 +1395,15 @@ static ssize_t dev_attr_show(struct kobject *kobj, struct attribute *attr,
 	struct device *dev = kobj_to_dev(kobj);
 	ssize_t ret = -EIO;
 
-	if (dev_attr->show)
+	if (dev_attr->show) {
+		struct qkx_attr_save save;
+
+		if (qkx_stallmon)
+			qkx_attr_enter(&save, dev_attr->show, dev_name(dev));
 		ret = dev_attr->show(dev, dev_attr, buf);
+		if (qkx_stallmon)
+			qkx_attr_exit(&save);
+	}
 	if (ret >= (ssize_t)PAGE_SIZE) {
 		printk("dev_attr_show: %pS returned bad count\n",
 				dev_attr->show);
@@ -1410,8 +1418,15 @@ static ssize_t dev_attr_store(struct kobject *kobj, struct attribute *attr,
 	struct device *dev = kobj_to_dev(kobj);
 	ssize_t ret = -EIO;
 
-	if (dev_attr->store)
+	if (dev_attr->store) {
+		struct qkx_attr_save save;
+
+		if (qkx_stallmon)
+			qkx_attr_enter(&save, dev_attr->store, dev_name(dev));
 		ret = dev_attr->store(dev, dev_attr, buf, count);
+		if (qkx_stallmon)
+			qkx_attr_exit(&save);
+	}
 	return ret;
 }
 

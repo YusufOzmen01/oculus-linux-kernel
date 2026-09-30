@@ -10,6 +10,7 @@
  * Standard functionality for the common clock API.  See Documentation/driver-api/clk.rst
  */
 
+#include <linux/qkx_diag.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/clk/clk-conf.h>
@@ -1163,7 +1164,10 @@ int clk_prepare(struct clk *clk)
 }
 EXPORT_SYMBOL_GPL(clk_prepare);
 
-static void clk_core_disable(struct clk_core *core)
+static void clk_core_disable(struct clk_core *core);
+static int clk_core_enable(struct clk_core *core);
+
+static void __qkx_clk_core_disable(struct clk_core *core)
 {
 	lockdep_assert_held(&enable_lock);
 
@@ -1220,7 +1224,21 @@ void clk_disable(struct clk *clk)
 }
 EXPORT_SYMBOL_GPL(clk_disable);
 
-static int clk_core_enable(struct clk_core *core)
+static void clk_core_disable(struct clk_core *core)
+{
+	struct qkx_ctx save;
+
+	if (!qkx_stallmon || !core) {
+		__qkx_clk_core_disable(core);
+		return;
+	}
+	qkx_ctx_enter(QKX_CTX_CLK, &save, __builtin_return_address(0), 0,
+		      core->name);
+	__qkx_clk_core_disable(core);
+	qkx_ctx_exit(QKX_CTX_CLK, &save);
+}
+
+static int __qkx_clk_core_enable(struct clk_core *core)
 {
 	int ret = 0;
 
@@ -1254,6 +1272,20 @@ static int clk_core_enable(struct clk_core *core)
 
 	core->enable_count++;
 	return 0;
+}
+
+static int clk_core_enable(struct clk_core *core)
+{
+	struct qkx_ctx save;
+	int ret;
+
+	if (!qkx_stallmon || !core)
+		return __qkx_clk_core_enable(core);
+	qkx_ctx_enter(QKX_CTX_CLK, &save, __builtin_return_address(0), 1,
+		      core->name);
+	ret = __qkx_clk_core_enable(core);
+	qkx_ctx_exit(QKX_CTX_CLK, &save);
+	return ret;
 }
 
 static int clk_core_enable_lock(struct clk_core *core)

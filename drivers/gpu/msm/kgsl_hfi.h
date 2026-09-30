@@ -592,6 +592,7 @@ struct pending_cmd {
  * @kgsldev: Point to the kgsl device
  * @hfi_interrupt_num: number of GMU asserted HFI interrupt
  * @cmdq_mutex: mutex to protect command queue access from multiple senders
+ * @req_mutex: mutex serializing synchronous write/ACK/response transactions
  * @tasklet: the thread handling received messages from GMU
  * @seqnum: atomic counter that is incremented for each message sent. The
  *	value of the counter is used as sequence number for HFI message
@@ -602,6 +603,7 @@ struct kgsl_hfi {
 	struct kgsl_device *kgsldev;
 	int hfi_interrupt_num;
 	struct mutex cmdq_mutex;
+	struct mutex req_mutex;
 	struct tasklet_struct tasklet;
 	atomic_t seqnum;
 	struct hfi_bwtable_cmd bwtbl_cmd;

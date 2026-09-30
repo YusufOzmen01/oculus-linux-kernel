@@ -5,6 +5,7 @@
 
 
 #include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
@@ -23,6 +24,15 @@
 #define SPI_NUM_CHIPSELECT	(4)
 #define SPI_XFER_TIMEOUT_MS	(250)
 #define SPI_AUTO_SUSPEND_DELAY	(250)
+
+static bool qkx_spi_dma_cleanup;
+static int __init qkx_spi_dma_cleanup_setup(char *str)
+{
+	qkx_spi_dma_cleanup = true;
+	return 0;
+}
+early_param("qkx_spi_dma_cleanup", qkx_spi_dma_cleanup_setup);
+
 /* SPI SE specific registers */
 #define SE_SPI_CPHA		(0x224)
 #define SE_SPI_LOOPBACK		(0x22C)
@@ -1789,6 +1799,46 @@ static int spi_geni_probe(struct platform_device *pdev)
 		ret = -ENOMEM;
 		dev_err(&pdev->dev, "Err IO mapping iomem\n");
 		goto spi_geni_probe_err;
+	}
+
+	/* syncboss can leave this SE's command sequencers and DMA FSMs active
+	 * across kexec, with GPI/SMMU ownership from the boot kernel. The first
+	 * real sensors command then reuses stale state and hard-resets the SoC.
+	 * Reset only the documented GENI SE state before requesting its IRQ;
+	 * normal cold boots are unchanged. */
+	if (qkx_spi_dma_cleanup && res->start == 0x980000) {
+		ret = se_geni_resources_on(rsc);
+		if (ret) {
+			dev_err(&pdev->dev,
+				"qkx: failed to enable resources for DMA cleanup: %d\n",
+				ret);
+			goto spi_geni_probe_unmap;
+		}
+		geni_write_reg_nolog(0, geni_mas->base, SE_GENI_M_IRQ_EN);
+		geni_write_reg_nolog(0, geni_mas->base, SE_GENI_S_IRQ_EN);
+		geni_write_reg_nolog(~0U, geni_mas->base, SE_DMA_RX_IRQ_EN_CLR);
+		geni_write_reg_nolog(~0U, geni_mas->base, SE_DMA_TX_IRQ_EN_CLR);
+		geni_write_reg_nolog(M_GENI_CMD_ABORT, geni_mas->base,
+				     SE_GENI_M_CMD_CTRL_REG);
+		geni_write_reg_nolog(S_GENI_CMD_ABORT, geni_mas->base,
+				     SE_GENI_S_CMD_CTRL_REG);
+		geni_write_reg_nolog(1, geni_mas->base, SE_DMA_RX_FSM_RST);
+		geni_write_reg_nolog(1, geni_mas->base, SE_DMA_TX_FSM_RST);
+		mb();
+		udelay(20);
+		geni_write_reg_nolog(~0U, geni_mas->base, SE_GENI_M_IRQ_CLEAR);
+		geni_write_reg_nolog(~0U, geni_mas->base, SE_GENI_S_IRQ_CLEAR);
+		geni_write_reg_nolog(~0U, geni_mas->base, SE_DMA_RX_IRQ_CLR);
+		geni_write_reg_nolog(~0U, geni_mas->base, SE_DMA_TX_IRQ_CLR);
+		geni_write_reg_nolog(FORCE_DEFAULT, geni_mas->base,
+				     GENI_FORCE_DEFAULT_REG);
+		geni_write_reg_nolog(0, geni_mas->base, SE_DMA_RX_PTR_L);
+		geni_write_reg_nolog(0, geni_mas->base, SE_DMA_RX_PTR_H);
+		geni_write_reg_nolog(0, geni_mas->base, SE_DMA_TX_PTR_L);
+		geni_write_reg_nolog(0, geni_mas->base, SE_DMA_TX_PTR_H);
+		mb();
+		se_geni_resources_off(rsc);
+		dev_info(&pdev->dev, "qkx: cleared inherited GENI DMA state\n");
 	}
 
 	geni_mas->irq = platform_get_irq(pdev, 0);

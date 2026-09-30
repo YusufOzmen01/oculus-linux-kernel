@@ -2097,4 +2097,10 @@ int __init socinfo_init(void)
 
 	return 0;
 }
-subsys_initcall(socinfo_init);
+/*
+ * The kexec runtime DT can probe SMEM after subsys_initcall.  Initializing
+ * socinfo one level later avoids permanently publishing dummy board data
+ * before SMEM_HW_SW_BUILD_ID becomes available, while still preceding the
+ * socinfo sysfs late_initcall above.
+ */
+device_initcall(socinfo_init);

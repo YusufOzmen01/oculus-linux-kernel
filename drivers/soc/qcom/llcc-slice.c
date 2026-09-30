@@ -54,6 +54,16 @@
 
 static struct llcc_drv_data *drv_data;
 
+/* qkx: the stock kernel already configured this live LLCC.  Reprogramming
+ * slices without a SoC reset can invalidate inherited cache/fabric state. */
+static bool qkx_llcc_adopt;
+static int __init qkx_llcc_adopt_setup(char *s)
+{
+	return kstrtobool(s, &qkx_llcc_adopt);
+}
+early_param("qkx_llcc_adopt", qkx_llcc_adopt_setup);
+
+
 static const struct regmap_config llcc_regmap_config = {
 	.reg_bits = 32,
 	.reg_stride = 4,
@@ -180,6 +190,9 @@ EXPORT_SYMBOL_GPL(llcc_slice_activate);
 int llcc_slice_deactivate(struct llcc_slice_desc *desc)
 {
 	u32 act_ctrl_val;
+
+	if (qkx_llcc_adopt)
+		return 0;
 	int ret;
 
 	mutex_lock(&drv_data->lock);
@@ -389,10 +402,19 @@ int qcom_llcc_probe(struct platform_device *pdev,
 	mutex_init(&drv_data->lock);
 	platform_set_drvdata(pdev, drv_data);
 
-	ret = qcom_llcc_cfg_program(pdev);
-	if (ret) {
-		pr_err("llcc configuration failed!!\n");
-		return ret;
+	if (qkx_llcc_adopt) {
+		/* Same OS/DT as the stock kernel: retain its live slice programming
+		 * and prevent clients from rewriting activation state. */
+		for (i = 0; i < sz; i++)
+			__set_bit(llcc_cfg[i].slice_id, drv_data->bitmap);
+		dev_info(dev, "qkx: adopted inherited LLCC configuration (%u slices)\n", sz);
+		ret = 0;
+	} else {
+		ret = qcom_llcc_cfg_program(pdev);
+		if (ret) {
+			pr_err("llcc configuration failed!!\n");
+			return ret;
+		}
 	}
 
 	drv_data->ecc_irq = platform_get_irq(pdev, 0);

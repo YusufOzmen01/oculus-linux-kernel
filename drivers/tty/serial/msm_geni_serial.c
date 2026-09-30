@@ -6,6 +6,7 @@
 
 #include <linux/bitmap.h>
 #include <linux/bitops.h>
+#include <linux/init.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/console.h>
@@ -28,6 +29,15 @@
 #include <linux/dma-mapping.h>
 #include <linux/workqueue.h>
 #include <linux/thermal.h>
+
+static bool qkx_uart_dma_cleanup;
+
+static int __init qkx_uart_dma_cleanup_setup(char *str)
+{
+	qkx_uart_dma_cleanup = true;
+	return 0;
+}
+early_param("qkx_uart_dma_cleanup", qkx_uart_dma_cleanup_setup);
 
 /* UART specific GENI registers */
 #define SE_UART_LOOPBACK_CFG		(0x22C)
@@ -1687,6 +1697,19 @@ static void start_rx_sequencer(struct uart_port *uport)
 	/* Start RX with the RFR_OPEN to keep RFR in always ready state */
 	geni_setup_s_cmd(uport->membase, UART_START_READ, geni_se_param);
 	msm_geni_serial_enable_interrupts(uport);
+
+	/* The boot kernel leaves syncboss UART RX with manual RFR asserted-ready
+	 * and DMA RX IRQ bit 4 enabled. FORCE_DEFAULT during the kexec cleanup
+	 * clears both, and this downstream GENI revision does not restore them:
+	 * TX succeeds but the MCU's reply never reaches memory. A stock/target
+	 * register diff plus the 4738-byte MCU `help` response verifies that these
+	 * are the two required handoff bits. Reapply after every RX start/resume. */
+	if (qkx_uart_dma_cleanup) {
+		geni_write_reg_nolog(BIT(4), uport->membase,
+					SE_DMA_RX_IRQ_EN_SET);
+		geni_write_reg_nolog(UART_MANUAL_RFR_EN, uport->membase,
+					SE_UART_MANUAL_RFR);
+	}
 
 	/* Ensure that the above writes go through */
 	mb();
@@ -4174,6 +4197,52 @@ static int msm_geni_serial_probe(struct platform_device *pdev)
 
 	dev_port->name = devm_kasprintf(uport->dev, GFP_KERNEL,
 					"msm_serial_geni%d", uport->line);
+
+	/*
+	 * A kexec can inherit an active GENI DMA transaction whose IOVA belonged
+	 * to the previous kernel.  Once apps-SMMU is re-established, that stale
+	 * transaction faults continuously and can starve the CPU handling the
+	 * fault IRQ.  Quiesce it before this driver's IRQ is requested; normal
+	 * cold boots retain the upstream behaviour.
+	 */
+	if (qkx_uart_dma_cleanup) {
+		ret = se_geni_resources_on(&dev_port->serial_rsc);
+		if (ret) {
+			dev_err(uport->dev,
+				"qkx: failed to enable resources for DMA cleanup: %d\n",
+				ret);
+			goto exit_wakeup_unregister;
+		}
+		/* DMA reset alone does not stop an inherited primary/secondary
+		 * sequencer command.  Abort both before forcing the SE back to its
+		 * default state; startup will program the UART afresh. */
+		geni_write_reg_nolog(0, uport->membase, SE_GENI_M_IRQ_EN);
+		geni_write_reg_nolog(0, uport->membase, SE_GENI_S_IRQ_EN);
+		geni_write_reg_nolog(~0U, uport->membase, SE_DMA_RX_IRQ_EN_CLR);
+		geni_write_reg_nolog(~0U, uport->membase, SE_DMA_TX_IRQ_EN_CLR);
+		geni_write_reg_nolog(M_GENI_CMD_ABORT, uport->membase,
+				     SE_GENI_M_CMD_CTRL_REG);
+		geni_write_reg_nolog(S_GENI_CMD_ABORT, uport->membase,
+				     SE_GENI_S_CMD_CTRL_REG);
+		geni_write_reg_nolog(1, uport->membase, SE_DMA_RX_FSM_RST);
+		geni_write_reg_nolog(1, uport->membase, SE_DMA_TX_FSM_RST);
+		mb();
+		udelay(20);
+		geni_write_reg_nolog(~0U, uport->membase, SE_GENI_M_IRQ_CLEAR);
+		geni_write_reg_nolog(~0U, uport->membase, SE_GENI_S_IRQ_CLEAR);
+		geni_write_reg_nolog(~0U, uport->membase, SE_DMA_RX_IRQ_CLR);
+		geni_write_reg_nolog(~0U, uport->membase, SE_DMA_TX_IRQ_CLR);
+		geni_write_reg_nolog(FORCE_DEFAULT, uport->membase,
+				     GENI_FORCE_DEFAULT_REG);
+		geni_write_reg_nolog(0, uport->membase, SE_DMA_RX_PTR_L);
+		geni_write_reg_nolog(0, uport->membase, SE_DMA_RX_PTR_H);
+		geni_write_reg_nolog(0, uport->membase, SE_DMA_TX_PTR_L);
+		geni_write_reg_nolog(0, uport->membase, SE_DMA_TX_PTR_H);
+		mb();
+		se_geni_resources_off(&dev_port->serial_rsc);
+		dev_info(uport->dev, "qkx: cleared inherited GENI DMA state\n");
+	}
+
 	irq_set_status_flags(uport->irq, IRQ_NOAUTOEN);
 	ret = devm_request_irq(uport->dev, uport->irq, msm_geni_serial_isr,
 				IRQF_TRIGGER_HIGH, dev_port->name, uport);

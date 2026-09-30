@@ -181,7 +181,7 @@ alternative_else_nop_endif
 ENDPROC(invalidate_icache_range)
 
 /*
- *	__flush_dcache_area(kaddr, size)
+ *	__qkx_raw_flush_dcache_area(kaddr, size)
  *
  *	Ensure that any D-cache lines for the interval [kaddr, kaddr+size)
  *	are cleaned and invalidated to the PoC.
@@ -189,10 +189,10 @@ ENDPROC(invalidate_icache_range)
  *	- kaddr   - kernel address
  *	- size    - size in question
  */
-ENTRY(__flush_dcache_area)
+ENTRY(__qkx_raw_flush_dcache_area)
 	dcache_by_line_op civac, sy, x0, x1, x2, x3
 	ret
-ENDPIPROC(__flush_dcache_area)
+ENDPIPROC(__qkx_raw_flush_dcache_area)
 
 /*
  *	__clean_dcache_area_pou(kaddr, size)
@@ -213,7 +213,7 @@ alternative_else_nop_endif
 ENDPROC(__clean_dcache_area_pou)
 
 /*
- *	__inval_dcache_area(kaddr, size)
+ *	__qkx_raw_inval_dcache_area(kaddr, size)
  *
  * 	Ensure that any D-cache lines for the interval [kaddr, kaddr+size)
  * 	are invalidated. Any partial lines at the ends of the interval are
@@ -222,7 +222,7 @@ ENDPROC(__clean_dcache_area_pou)
  *	- kaddr   - kernel address
  *	- size    - size in question
  */
-ENTRY(__inval_dcache_area)
+ENTRY(__qkx_raw_inval_dcache_area)
 	/* FALLTHROUGH */
 
 /*
@@ -249,11 +249,11 @@ ENTRY(__dma_inv_area)
 	b.lo	2b
 	dsb	sy
 	ret
-ENDPIPROC(__inval_dcache_area)
+ENDPIPROC(__qkx_raw_inval_dcache_area)
 ENDPROC(__dma_inv_area)
 
 /*
- *	__clean_dcache_area_poc(kaddr, size)
+ *	__qkx_raw_clean_dcache_area_poc(kaddr, size)
  *
  * 	Ensure that any D-cache lines for the interval [kaddr, kaddr+size)
  * 	are cleaned to the PoC.
@@ -261,7 +261,7 @@ ENDPROC(__dma_inv_area)
  *	- kaddr   - kernel address
  *	- size    - size in question
  */
-ENTRY(__clean_dcache_area_poc)
+ENTRY(__qkx_raw_clean_dcache_area_poc)
 	/* FALLTHROUGH */
 
 /*
@@ -272,7 +272,7 @@ ENTRY(__clean_dcache_area_poc)
 ENTRY(__dma_clean_area)
 	dcache_by_line_op cvac, sy, x0, x1, x2, x3
 	ret
-ENDPIPROC(__clean_dcache_area_poc)
+ENDPIPROC(__qkx_raw_clean_dcache_area_poc)
 ENDPROC(__dma_clean_area)
 
 /*
@@ -286,7 +286,7 @@ ENDPROC(__dma_clean_area)
  */
 ENTRY(__clean_dcache_area_pop)
 	alternative_if_not ARM64_HAS_DCPOP
-	b	__clean_dcache_area_poc
+	b	__qkx_raw_clean_dcache_area_poc
 	alternative_else_nop_endif
 	dcache_by_line_op cvap, sy, x0, x1, x2, x3
 	ret

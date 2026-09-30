@@ -31,6 +31,7 @@
 #include <asm/alternative.h>
 #include <asm/cpufeature.h>
 #include <linux/msm_rtb.h>
+#include <linux/qkx_diag.h>
 
 #include <xen/xen.h>
 
@@ -110,7 +111,9 @@ static inline u64 __raw_readq_no_log(const volatile void __iomem *addr)
 	void *_addr = (void *)(a); \
 	_ret = uncached_logk(LOGK_WRITEL, _addr); \
 	ETB_WAYPOINT; \
+	qkx_mmio_enter(_addr, __builtin_return_address(0), true); \
 	__raw_write##_t##_no_log((v), _addr); \
+	qkx_mmio_exit(); \
 	if (_ret) \
 		LOG_BARRIER; \
 	})
@@ -126,7 +129,9 @@ static inline u64 __raw_readq_no_log(const volatile void __iomem *addr)
 	int _ret; \
 	_ret = uncached_logk(LOGK_READL, _addr); \
 	ETB_WAYPOINT; \
+	qkx_mmio_enter(_addr, __builtin_return_address(0), false); \
 	__a = __raw_read##_l##_no_log(_addr); \
+	qkx_mmio_exit(); \
 	if (_ret) \
 		LOG_BARRIER; \
 	__a; \

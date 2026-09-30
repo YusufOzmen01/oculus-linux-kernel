@@ -27,6 +27,7 @@
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
 #include <linux/percpu.h>
+#include <linux/qkx_diag.h>
 #include <linux/slab.h>
 #include <linux/msm_rtb.h>
 #include <linux/wakeup_reason.h>
@@ -136,6 +137,29 @@ static u64 __maybe_unused gic_read_iar(void)
 		return gic_read_iar_common();
 }
 #endif
+
+void qkx_gic_dump_cpu(unsigned int cpu)
+{
+	struct redist_region *unused __maybe_unused;
+	struct rdists *rd = &gic_data.rdists;
+	void __iomem *rbase, *sgi;
+
+	if (!qkx_stallmon || cpu >= nr_cpu_ids || !rd->rdist)
+		return;
+	rbase = per_cpu_ptr(rd->rdist, cpu)->rd_base;
+	if (!rbase) {
+		pr_err("qkx-gic: cpu%u has no redistributor base\n", cpu);
+		return;
+	}
+	sgi = rbase + SZ_64K;
+	pr_err("qkx-gic: cpu%u waker=%08x ctlr=%08x enable=%08x pending=%08x active=%08x group=%08x\n",
+	       cpu, readl_relaxed(rbase + GICR_WAKER),
+	       readl_relaxed(rbase + GICR_CTLR),
+	       readl_relaxed(sgi + GICR_ISENABLER0),
+	       readl_relaxed(sgi + GICR_ISPENDR0),
+	       readl_relaxed(sgi + GICR_ISACTIVER0),
+	       readl_relaxed(sgi + GICR_IGROUPR0));
+}
 
 static void gic_enable_redist(bool enable)
 {
@@ -943,9 +967,22 @@ static bool gic_dist_security_disabled(void)
 	return readl_relaxed(gic_data.dist_base + GICD_CTLR) & GICD_CTLR_DS;
 }
 
+static DEFINE_PER_CPU(struct qkx_ctx, qkx_gic_pm_save);
+
 static int gic_cpu_pm_notifier(struct notifier_block *self,
 			       unsigned long cmd, void *v)
 {
+	if (qkx_stallmon && cmd == CPU_PM_ENTER) {
+		struct qkx_ctx *save = this_cpu_ptr(&qkx_gic_pm_save);
+
+		qkx_ctx_enter(QKX_CTX_CPUPM, save, gic_cpu_pm_notifier, cmd,
+			      "gic-cpu-pm-enter");
+		qkx_ctx_set_args(QKX_CTX_CPUPM,
+			 read_gicreg(ICC_PMR_EL1), read_gicreg(ICC_IGRPEN1_EL1));
+	} else if (qkx_stallmon &&
+		   (cmd == CPU_PM_EXIT || cmd == CPU_PM_ENTER_FAILED)) {
+		qkx_ctx_exit(QKX_CTX_CPUPM, this_cpu_ptr(&qkx_gic_pm_save));
+	}
 	if (from_suspend)
 		return NOTIFY_OK;
 

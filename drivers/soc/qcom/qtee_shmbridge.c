@@ -241,6 +241,20 @@ int32_t qtee_shmbridge_register(
 			__func__, desc.arginfo, desc.args[0],
 			desc.args[1], desc.args[2], desc.args[3]);
 	ret = scm_call2(TZ_SHM_BRIDGE_CREATE, &desc);
+	/*
+	 * After a kexec, TZ still holds the bridges the previous kernel made
+	 * for the same fixed carveouts and refuses to create them again with
+	 * status 0xf. Their parameters come from the same DT, so treat the
+	 * region as bridged and carry on without a handle; this kernel never
+	 * deregisters these heaps outside of driver removal.
+	 */
+	if (!ret && desc.ret[0] == 0xf) {
+		pr_warn("qkx: adopting existing shmbridge at %pa size %zx\n",
+			&paddr, size);
+		*handle = 0;
+		ret = qtee_shmbridge_list_add_nolock(paddr, 0);
+		goto exit;
+	}
 	if (ret || desc.ret[0]) {
 		pr_err("create shmbridge failed, ret = %d, status = %llx\n",
 				ret, desc.ret[0]);
@@ -263,6 +277,10 @@ int32_t qtee_shmbridge_deregister(uint64_t handle)
 	struct scm_desc desc = {0};
 
 	if (!qtee_shmbridge_enabled)
+		return 0;
+
+	/* Adopted bridges (see qtee_shmbridge_register) have no handle. */
+	if (!handle)
 		return 0;
 
 	mutex_lock(&bridge_list_head.lock);

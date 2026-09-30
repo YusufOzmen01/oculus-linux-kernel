@@ -71,7 +71,10 @@ static ssize_t show_time_in_state(struct cpufreq_policy *policy, char *buf)
 		busy_time = 0;
 		idle_time = 0;
 		for_each_cpu(cpu, policy->related_cpus) {
-			index = cpu - stats->cpu;
+			index = cpu;
+			if (!stats->busy_time_in_state_per_cpu[index] ||
+			    !stats->idle_time_in_state_per_cpu[index])
+				continue;
 			busy_time += stats->busy_time_in_state_per_cpu[index][i];
 			idle_time += stats->idle_time_in_state_per_cpu[index][i];
 		}
@@ -85,7 +88,10 @@ static ssize_t show_time_in_state(struct cpufreq_policy *policy, char *buf)
 			nsec_to_clock_t(idle_time));
 
 		for_each_cpu(cpu, policy->related_cpus) {
-			index = cpu - stats->cpu;
+			index = cpu;
+			if (!stats->busy_time_in_state_per_cpu[index] ||
+			    !stats->idle_time_in_state_per_cpu[index])
+				continue;
 			len += sprintf(buf + len, " %llu %llu",
 				(unsigned long long)
 				nsec_to_clock_t(stats->busy_time_in_state_per_cpu[index][i]),
@@ -197,7 +203,7 @@ void cpufreq_stats_free_table(struct cpufreq_policy *policy)
 void cpufreq_stats_create_table(struct cpufreq_policy *policy)
 {
 	unsigned int i = 0, count = 0, ret = -ENOMEM;
-	unsigned int cpu = 0, ncpus = 0;
+	unsigned int cpu = 0, prev_cpu = nr_cpu_ids, ncpus = 0;
 	int index = -1;
 	struct cpufreq_stats *stats;
 	unsigned int alloc_size, alloc_size_per_core;
@@ -216,7 +222,7 @@ void cpufreq_stats_create_table(struct cpufreq_policy *policy)
 		return;
 
 	ncpus = cpumask_weight(policy->related_cpus);
-	alloc_size_per_core = ncpus * sizeof(u64);
+	alloc_size_per_core = nr_cpu_ids * sizeof(u64 *);
 	alloc_size = count * sizeof(int) + (1 + 2 * ncpus) * count * sizeof(u64);
 
 	alloc_size += count * count * sizeof(int);
@@ -234,15 +240,17 @@ void cpufreq_stats_create_table(struct cpufreq_policy *policy)
 	if (!stats->idle_time_in_state_per_cpu)
 		goto free_stat;
 
+	index = 0;
 	for_each_cpu(cpu, policy->related_cpus) {
-		if (index < 0) {
+		if (index == 0)
 			stats->cpu = cpu;
-		}
-		index = cpu - stats->cpu;
-
-		stats->busy_time_in_state_per_cpu[index] = (index != 0) ?
-			stats->idle_time_in_state_per_cpu[index - 1] + count : stats->time_in_state + count;
-		stats->idle_time_in_state_per_cpu[index] = stats->busy_time_in_state_per_cpu[index] + count;
+		stats->busy_time_in_state_per_cpu[cpu] = index ?
+			stats->idle_time_in_state_per_cpu[prev_cpu] + count :
+			stats->time_in_state + count;
+		stats->idle_time_in_state_per_cpu[cpu] =
+			stats->busy_time_in_state_per_cpu[cpu] + count;
+		prev_cpu = cpu;
+		index++;
 	}
 
 	stats->freq_table = (unsigned int *)(stats->time_in_state + (1 + 2 * ncpus) * count);

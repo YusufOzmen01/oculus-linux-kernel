@@ -1516,6 +1516,11 @@ struct task_struct {
 	 * New fields for task_struct should be added above here, so that
 	 * they are included in the randomized portion of task_struct.
 	 */
+	/* qkx: sysfs show/store in progress (task-owned; survives migration) */
+	const void			*qkx_attr_fn;
+	char				qkx_attr_what[32];
+	u64				qkx_attr_since;
+
 	randomized_struct_fields_end
 
 	/* CPU-specific state of this task: */

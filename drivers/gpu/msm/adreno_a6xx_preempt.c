@@ -908,7 +908,13 @@ int a6xx_preemption_init(struct adreno_device *adreno_dev)
 	}
 
 
-	set_bit(ADRENO_DEVICE_PREEMPTION, &adreno_dev->priv);
+	/*
+	 * The GPU is inherited across kexec after the stock kernel has used
+	 * A6xx preemption. Re-enabling CP preemption in the target causes the
+	 * first multi-context Android workload to stall without an SMMU fault.
+	 * Keep all contexts on ringbuffer 0; rendering remains fully enabled.
+	 */
+	pr_info("qkx: A6xx preemption disabled for kexec handoff\n");
 	return 0;
 }
 

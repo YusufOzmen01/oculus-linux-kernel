@@ -14,8 +14,23 @@
  */
 
 #include <linux/crypto-qti-common.h>
+#include <linux/module.h>
 #include "crypto-qti-ice-regs.h"
 #include "crypto-qti-platform.h"
+
+static bool qkx_ice_keep_advctl;
+static int __init qkx_ice_keep_advctl_setup(char *s)
+{
+	return kstrtobool(s, &qkx_ice_keep_advctl);
+}
+early_param("qkx_ice_keep_advctl", qkx_ice_keep_advctl_setup);
+
+static bool qkx_ice_advctl_optonly;
+static int __init qkx_ice_advctl_optonly_setup(char *s)
+{
+	return kstrtobool(s, &qkx_ice_advctl_optonly);
+}
+early_param("qkx_ice_advctl_optonly", qkx_ice_advctl_optonly_setup);
 
 static int ice_check_fuse_setting(struct crypto_vops_qti_entry *ice_entry)
 {
@@ -173,7 +188,18 @@ int crypto_qti_enable(void *priv_data)
 		return -EINVAL;
 	}
 
-	ice_low_power_and_optimization_enable(ice_entry);
+	if (!qkx_ice_keep_advctl)
+		ice_low_power_and_optimization_enable(ice_entry);
+	else if (qkx_ice_advctl_optonly) {
+		uint32_t regval = ice_readl(ice_entry, ICE_REGS_ADVANCED_CONTROL);
+
+		regval &= ~0x7000;
+		regval |= 0xD807100;
+		ice_writel(ice_entry, regval, ICE_REGS_ADVANCED_CONTROL);
+		wmb();
+		pr_info("qkx: ICE ADVANCED_CONTROL opt-only=%#x\n", regval);
+	} else
+		pr_info("qkx: keeping inherited ICE ADVANCED_CONTROL\n");
 	err = ice_wait_bist_status(ice_entry);
 	if (err)
 		return err;

@@ -668,9 +668,9 @@ int msm_bus_commit_data(struct list_head *clist)
 	tcs_cmd_n_shrink(n_wake);
 	tcs_cmd_n_shrink(n_sleep);
 
-	pr_emerg("qkxbus: commit rsc invalidate\n");
+	pr_debug("qkxbus: commit rsc invalidate\n");
 	ret = rpmh_invalidate(cur_mbox);
-	pr_emerg("qkxbus: commit invalidate ret=%d\n", ret);
+	pr_debug("qkxbus: commit invalidate ret=%d\n", ret);
 	if (ret)
 		MSM_BUS_ERR("%s: Error invalidating mbox: %d\n",
 						__func__, ret);
@@ -709,7 +709,7 @@ int msm_bus_commit_data(struct list_head *clist)
 							__func__, ret);
 	}
 
-	pr_emerg("qkxbus: commit rsc=%d writes done ret=%d n=%d\n",
+	pr_debug("qkxbus: commit rsc=%d writes done ret=%d n=%d\n",
 		 cur_rsc->node_info->id, ret, n_active[0]);
 	list_for_each_entry_safe(node, node_tmp, clist, link) {
 		if (unlikely(node->node_info->defer_qos))
@@ -1036,18 +1036,18 @@ static int msm_bus_dev_init_qos(struct device *dev, void *data)
 					goto exit_init_qos;
 				qkx_bus_qos_count++;
 				if (qkx_bus_qos_skipped(node_dev->node_info->id)) {
-					pr_emerg("qkxbus: qos node %d skipped\n",
+					pr_info("qkxbus: qos node %d skipped\n",
 						 node_dev->node_info->id);
 					goto exit_init_qos;
 				}
 
-				pr_emerg("qkxbus: qos #%d node %d vote\n",
+				pr_info("qkxbus: qos #%d node %d vote\n",
 					 qkx_bus_qos_count,
 					 node_dev->node_info->id);
 				ret = 0;
 				if (!(qkx_bus_qos_skip & 1))
 					ret = msm_bus_vote_qos_bcms(node_dev);
-				pr_emerg("qkxbus: qos node %d vote ret=%d clk\n",
+				pr_info("qkxbus: qos node %d vote ret=%d clk\n",
 					 node_dev->node_info->id, ret);
 				if (!(qkx_bus_qos_skip & 2))
 					ret = msm_bus_enable_node_qos_clk(node_dev);
@@ -1058,7 +1058,7 @@ static int msm_bus_dev_init_qos(struct device *dev, void *data)
 					goto exit_init_qos;
 				}
 
-				pr_emerg("qkxbus: qos node %d mmio base=%pK off=%x qoff=%x\n",
+				pr_info("qkxbus: qos node %d mmio base=%pK off=%x qoff=%x\n",
 					 node_dev->node_info->id,
 					 bus_node_info->fabdev->qos_base,
 					 bus_node_info->fabdev->base_offset,
@@ -1070,7 +1070,7 @@ static int msm_bus_dev_init_qos(struct device *dev, void *data)
 					bus_node_info->fabdev->base_offset,
 					bus_node_info->fabdev->qos_off,
 					bus_node_info->fabdev->qos_freq);
-				pr_emerg("qkxbus: qos node %d mmio done\n",
+				pr_info("qkxbus: qos node %d mmio done\n",
 					 node_dev->node_info->id);
 				if (!(qkx_bus_qos_skip & 2))
 					ret = msm_bus_disable_node_qos_clk(node_dev);
@@ -1878,9 +1878,9 @@ core_param(qkx_bus_stop, qkx_bus_stop, int, 0444);
 static bool qkx_bus_probed;
 
 #define QKX_BUS_STOP(n) do {						\
-	pr_emerg("qkxbus: phase %d reached\n", n);			\
+	pr_info("qkxbus: phase %d reached\n", n);			\
 	if (qkx_bus_stop == (n)) {					\
-		pr_emerg("qkxbus: stopping at phase %d\n", n);		\
+		pr_info("qkxbus: stopping at phase %d\n", n);		\
 		return -ENODEV;						\
 	}								\
 } while (0)
@@ -1956,7 +1956,7 @@ static int msm_bus_device_probe(struct platform_device *pdev)
 	}
 
 	QKX_BUS_STOP(2);
-	pr_emerg("qkxbus: phase dev_conn (%d nodes)\n", pdata->num_devices);
+	pr_info("qkxbus: phase dev_conn (%d nodes)\n", pdata->num_devices);
 	ret = bus_for_each_dev(&msm_bus_type, NULL, NULL,
 						msm_bus_setup_dev_conn);
 	if (ret) {
@@ -1964,7 +1964,7 @@ static int msm_bus_device_probe(struct platform_device *pdev)
 		goto exit_device_probe;
 	}
 
-	pr_emerg("qkxbus: phase postcon\n");
+	pr_info("qkxbus: phase postcon\n");
 	ret = bus_for_each_dev(&msm_bus_type, NULL, NULL,
 						msm_bus_postcon_setup);
 	if (ret) {
@@ -1978,9 +1978,9 @@ static int msm_bus_device_probe(struct platform_device *pdev)
 	 * and we want to continue the probe.
 	 */
 	QKX_BUS_STOP(3);
-	pr_emerg("qkxbus: phase init_qos\n");
+	pr_info("qkxbus: phase init_qos\n");
 	ret = bus_for_each_dev(&msm_bus_type, NULL, NULL, msm_bus_dev_init_qos);
-	pr_emerg("qkxbus: phase init_qos done (%d nodes programmed)\n",
+	pr_info("qkxbus: phase init_qos done (%d nodes programmed)\n",
 		 qkx_bus_qos_count);
 	QKX_BUS_STOP(4);
 	qkx_bus_probed = true;
@@ -2134,10 +2134,10 @@ int __init msm_bus_device_init_driver(void)
 int __init msm_bus_device_late_init(void)
 {
 	if (!qkx_bus_probed) {
-		pr_emerg("qkxbus: probe incomplete; skipping late_init commit\n");
+		pr_warn("qkxbus: probe incomplete; skipping late_init commit\n");
 		return 0;
 	}
-	pr_emerg("qkxbus: late_init commit\n");
+	pr_info("qkxbus: late_init commit\n");
 	commit_late_init_data(true);
 	MSM_BUS_ERR("msm_bus_late_init: Remove handoff bw requests\n");
 	init_time = false;

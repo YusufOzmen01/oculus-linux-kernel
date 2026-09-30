@@ -33,6 +33,9 @@
 #include <linux/cpu_cooling.h>
 #include <linux/energy_model.h>
 #include <linux/of_device.h>
+#ifdef CONFIG_ARM64
+#include <asm/smp_plat.h>
+#endif
 
 #include <trace/events/thermal.h>
 
@@ -681,8 +684,20 @@ __cpufreq_cooling_register(struct device_node *np,
 
 	cpufreq_cdev->id = policy->cpu;
 
+	/*
+	 * Android identifies the Kona clusters by their physical CPU number
+	 * (0/4/7).  A runtime DT reconstructed from /proc/device-tree can have
+	 * shuffled CPU nodes, making the logical policy CPUs 0/1/2 instead.
+	 * Keep the cooling device attached to the existing policy, but expose
+	 * the stable physical name expected by the thermal/power HAL.
+	 */
+#ifdef CONFIG_ARM64
+	snprintf(dev_name, sizeof(dev_name), "thermal-cpufreq-%llu",
+		 (cpu_logical_map(policy->cpu) >> 8) & 0xff);
+#else
 	snprintf(dev_name, sizeof(dev_name), "thermal-cpufreq-%d",
 		 cpufreq_cdev->id);
+#endif
 	cpufreq_cdev->plat_ops = plat_ops;
 
 	cdev = thermal_of_cooling_device_register(np, dev_name, cpufreq_cdev,

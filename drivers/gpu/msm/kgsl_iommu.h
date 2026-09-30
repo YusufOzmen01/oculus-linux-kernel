@@ -165,6 +165,14 @@ struct kgsl_iommu {
 	u32 cb0_offset;
 	/** @pagesize: Size of each context bank register space */
 	u32 pagesize;
+	/*
+	 * qkx: post-kexec, context bank fault IRQs are never actually delivered
+	 * to the GIC (confirmed: irq pend/act stay 0 across faults seconds
+	 * apart, not just a missed edge). This thread polls FSR directly so a
+	 * fault is still handled quickly instead of waiting out the dispatcher's
+	 * multi-second hang timeout on every first touch of a page.
+	 */
+	struct task_struct *qkx_fault_poll_task;
 };
 
 /*
@@ -225,5 +233,8 @@ struct kgsl_iommu_addr_entry {
 
 #define KGSL_IOMMU_GET_CTX_REG(ctx, offset) \
 		readl_relaxed((ctx)->regbase + (offset))
+
+struct kgsl_mmu;
+void kgsl_iommu_qkx_dump_faults(struct kgsl_mmu *mmu);
 
 #endif

@@ -1056,9 +1056,39 @@ static int a6xx_gmu_fw_start(struct kgsl_device *device,
 		gmu_core_regwrite(device, A6XX_GMU_GENERAL_7, 1);
 
 		if (!test_and_set_bit(GMU_BOOT_INIT_DONE,
-			&device->gmu_core.flags))
+			&device->gmu_core.flags)) {
+			unsigned int rsc = 0;
+
 			ret = _load_gmu_rpmh_ucode(device);
-		else
+			/*
+			 * A kexec'd kernel inherits the GPU RSC/PDC in whatever
+			 * state the previous kernel left them. Its GMU slumber ran
+			 * the RSC sleep sequence, and the flag recording that
+			 * lived in the old kernel's memory. Without the matching
+			 * wake sequence every RPMh vote from the GMU (starting
+			 * with GX_BW_PERF_VOTE) waits forever. A real cold boot
+			 * finds the RSC awake, so this only acts after kexec.
+			 */
+			if (!ret) {
+				if (adreno_is_a650_family(adreno_dev))
+					adreno_rscc_regread(adreno_dev,
+						A6XX_GPU_RSCC_RSC_STATUS0_DRV0,
+						&rsc);
+				else
+					gmu_core_regread(device,
+						A6XX_GPU_RSCC_RSC_STATUS0_DRV0 +
+						RSCC_OFFSET_LEGACY, &rsc);
+				dev_info(&gmu->pdev->dev,
+					"first boot: RSC status0 %08x\n", rsc);
+				if (rsc & BIT(16)) {
+					dev_info(&gmu->pdev->dev,
+						"RSC inherited asleep; running wake sequence\n");
+					set_bit(GMU_RSCC_SLEEP_SEQ_DONE,
+						&device->gmu_core.flags);
+					ret = a6xx_rpmh_power_on_gpu(device);
+				}
+			}
+		} else
 			ret = a6xx_rpmh_power_on_gpu(device);
 		if (ret)
 			return ret;

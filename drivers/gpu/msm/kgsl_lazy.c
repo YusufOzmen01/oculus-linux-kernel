@@ -1412,6 +1412,11 @@ err:
 	}
 
 bad_offset:
+	if (status)
+		pr_err("qkx: lazy fault addr 0x%lx off 0x%llx size 0x%llx secure %d pools_init %d status %d\n",
+			addr, offset, memdesc->size, secure, lazy_pools_initialized,
+			status);
+
 	/* Put the reference to the entry we took earlier (if applicable) */
 	_put_memdesc_ref(memdesc);
 

@@ -28,6 +28,8 @@
 #include <linux/percpu.h>
 #include <linux/hardirq.h>
 #include <linux/mutex.h>
+#include <linux/qkx_diag.h>
+#include <linux/ktime.h>
 #include <linux/prefetch.h>
 #include <asm/byteorder.h>
 #include <asm/qspinlock.h>
@@ -305,7 +307,8 @@ static __always_inline u32  __pv_wait_head_or_lock(struct qspinlock *lock,
  * contended             :    (*,x,y) +--> (*,0,0) ---> (*,0,1) -'  :
  *   queue               :         ^--'                             :
  */
-void queued_spin_lock_slowpath(struct qspinlock *lock, u32 val)
+static __always_inline void __queued_spin_lock_slowpath(struct qspinlock *lock,
+							u32 val)
 {
 	struct mcs_spinlock *prev, *next, *node;
 	u32 old, tail;
@@ -515,6 +518,33 @@ release:
 	 * release the node
 	 */
 	__this_cpu_dec(mcs_nodes[0].count);
+}
+
+/*
+ * qkx: record contended waits so the stall monitor can name the lock and
+ * call chain a frozen CPU is spinning on. Nesting (an IRQ contending while
+ * the interrupted context also waits) keeps the outer record intact.
+ */
+noinline notrace void queued_spin_lock_slowpath(struct qspinlock *lock, u32 val)
+{
+	struct qkx_lockwait *w, saved;
+
+	if (!qkx_stallmon) {
+		__queued_spin_lock_slowpath(lock, val);
+		return;
+	}
+	w = this_cpu_ptr(&qkx_lockwait);
+	saved = *w;
+	w->lock = lock;
+	w->ip[0] = (unsigned long)__builtin_return_address(0);
+	/* Deeper __builtin_return_address() walks frame pointers without
+	 * bounds checks and faults at the end of a kthread's chain. */
+	w->ip[1] = w->ip[2] = w->ip[3] = 0;
+	w->since = ktime_get_mono_fast_ns();
+	barrier();
+	__queued_spin_lock_slowpath(lock, val);
+	barrier();
+	*w = saved;
 }
 EXPORT_SYMBOL(queued_spin_lock_slowpath);
 

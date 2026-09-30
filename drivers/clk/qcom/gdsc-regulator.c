@@ -3,6 +3,7 @@
  * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
  */
 
+#include <linux/qkx_diag.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/io.h>
@@ -609,10 +610,35 @@ static int gdsc_set_mode(struct regulator_dev *rdev, unsigned int mode)
 	return ret;
 }
 
+static int qkx_gdsc_toggle(struct regulator_dev *rdev, bool on)
+{
+	struct gdsc *sc = rdev_get_drvdata(rdev);
+	struct qkx_ctx save;
+	int ret;
+
+	if (!qkx_stallmon)
+		return on ? gdsc_enable(rdev) : gdsc_disable(rdev);
+	qkx_ctx_enter(QKX_CTX_GDSC, &save, on ? (void *)gdsc_enable :
+		      (void *)gdsc_disable, on, sc->rdesc.name);
+	ret = on ? gdsc_enable(rdev) : gdsc_disable(rdev);
+	qkx_ctx_exit(QKX_CTX_GDSC, &save);
+	return ret;
+}
+
+static int qkx_gdsc_enable(struct regulator_dev *rdev)
+{
+	return qkx_gdsc_toggle(rdev, true);
+}
+
+static int qkx_gdsc_disable(struct regulator_dev *rdev)
+{
+	return qkx_gdsc_toggle(rdev, false);
+}
+
 static struct regulator_ops gdsc_ops = {
 	.is_enabled = gdsc_is_enabled,
-	.enable = gdsc_enable,
-	.disable = gdsc_disable,
+	.enable = qkx_gdsc_enable,
+	.disable = qkx_gdsc_disable,
 	.set_mode = gdsc_set_mode,
 	.get_mode = gdsc_get_mode,
 };

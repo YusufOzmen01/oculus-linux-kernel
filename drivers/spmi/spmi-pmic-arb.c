@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved. */
 
+#include <linux/qkx_diag.h>
 #include <linux/bitmap.h>
 #include <linux/delay.h>
 #include <linux/err.h>
@@ -332,7 +333,7 @@ static int pmic_arb_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid)
 	return pmic_arb->ver_ops->non_data_cmd(ctrl, opc, sid);
 }
 
-static int pmic_arb_read_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid,
+static int __qkx_pmic_arb_read_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid,
 			     u16 addr, u8 *buf, size_t len)
 {
 	struct spmi_pmic_arb *pmic_arb = spmi_controller_get_drvdata(ctrl);
@@ -385,7 +386,7 @@ done:
 	return rc;
 }
 
-static int pmic_arb_write_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid,
+static int __qkx_pmic_arb_write_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid,
 			u16 addr, const u8 *buf, size_t len)
 {
 	struct spmi_pmic_arb *pmic_arb = spmi_controller_get_drvdata(ctrl);
@@ -436,6 +437,44 @@ static int pmic_arb_write_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid,
 	raw_spin_unlock_irqrestore(&pmic_arb->lock, flags);
 
 	return rc;
+}
+
+/*
+ * qkx: record the in-flight SPMI command per CPU (irq/arg = sid<<16 | addr).
+ * Preemption stays off so the record cannot be left behind on migration.
+ */
+static int qkx_spmi_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid, u16 addr,
+			u8 *rbuf, const u8 *wbuf, size_t len)
+{
+	struct qkx_ctx save;
+	char what[24];
+	int ret;
+
+	if (!qkx_stallmon)
+		return rbuf ? __qkx_pmic_arb_read_cmd(ctrl, opc, sid, addr, rbuf, len)
+			    : __qkx_pmic_arb_write_cmd(ctrl, opc, sid, addr, wbuf, len);
+	preempt_disable();
+	snprintf(what, sizeof(what), "%s opc=%02x len=%zu", rbuf ? "rd" : "wr",
+		 opc, len);
+	qkx_ctx_enter(QKX_CTX_SPMI, &save, __builtin_return_address(0),
+		      (sid << 16) | addr, what);
+	ret = rbuf ? __qkx_pmic_arb_read_cmd(ctrl, opc, sid, addr, rbuf, len)
+		   : __qkx_pmic_arb_write_cmd(ctrl, opc, sid, addr, wbuf, len);
+	qkx_ctx_exit(QKX_CTX_SPMI, &save);
+	preempt_enable();
+	return ret;
+}
+
+static int pmic_arb_read_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid,
+			     u16 addr, u8 *buf, size_t len)
+{
+	return qkx_spmi_cmd(ctrl, opc, sid, addr, buf, NULL, len);
+}
+
+static int pmic_arb_write_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid,
+			u16 addr, const u8 *buf, size_t len)
+{
+	return qkx_spmi_cmd(ctrl, opc, sid, addr, NULL, buf, len);
 }
 
 enum qpnpint_regs {

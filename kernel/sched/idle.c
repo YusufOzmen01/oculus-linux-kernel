@@ -6,6 +6,7 @@
  *        tasks which are handled in sched/fair.c )
  */
 #include "sched.h"
+#include <linux/qkx_diag.h>
 
 #include <trace/events/power.h>
 
@@ -61,8 +62,11 @@ static noinline int __cpuidle cpu_idle_poll(void)
 
 	while (!tif_need_resched() &&
 	       (cpu_idle_force_poll || tick_check_broadcast_expired() ||
-	        is_reserved(smp_processor_id())))
+	        is_reserved(smp_processor_id()))) {
+		if (qkx_stallmon)
+			this_cpu_inc(qkx_poll_count);
 		cpu_relax();
+	}
 
 	rcu_idle_exit();
 	start_critical_timings();
@@ -235,6 +239,9 @@ static void do_idle(void)
 	while (!need_resched()) {
 		check_pgt_cache();
 		rmb();
+
+		if (qkx_stallmon)
+			qkx_stall_note_idle();
 
 		local_irq_disable();
 

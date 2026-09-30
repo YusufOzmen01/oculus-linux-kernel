@@ -20,6 +20,9 @@
 
 #include <asm/ptrace.h>
 
+extern bool qkx_irqmask_ready;
+extern void qkx_irqmask_note(bool disabled, const void *caller);
+
 /*
  * Aarch64 has flags for masking: Debug, Asynchronous (serror), Interrupts and
  * FIQ exceptions, in the 'daif' register. We mask and unmask them in 'dai'
@@ -45,11 +48,15 @@ static inline unsigned long arch_local_irq_save(void)
 		: "=r" (flags)
 		:
 		: "memory");
+	if (qkx_irqmask_ready && !(flags & PSR_I_BIT))
+		qkx_irqmask_note(true, __builtin_return_address(0));
 	return flags;
 }
 
 static inline void arch_local_irq_enable(void)
 {
+	if (qkx_irqmask_ready)
+		qkx_irqmask_note(false, __builtin_return_address(0));
 	asm volatile(
 		"msr	daifclr, #2		// arch_local_irq_enable"
 		:
@@ -59,11 +66,16 @@ static inline void arch_local_irq_enable(void)
 
 static inline void arch_local_irq_disable(void)
 {
+	unsigned long flags;
+
+	asm volatile("mrs %0, daif" : "=r" (flags));
 	asm volatile(
 		"msr	daifset, #2		// arch_local_irq_disable"
 		:
 		:
 		: "memory");
+	if (qkx_irqmask_ready && !(flags & PSR_I_BIT))
+		qkx_irqmask_note(true, __builtin_return_address(0));
 }
 
 /*
@@ -85,6 +97,8 @@ static inline unsigned long arch_local_save_flags(void)
  */
 static inline void arch_local_irq_restore(unsigned long flags)
 {
+	if (qkx_irqmask_ready && !(flags & PSR_I_BIT))
+		qkx_irqmask_note(false, __builtin_return_address(0));
 	asm volatile(
 		"msr	daif, %0		// arch_local_irq_restore"
 	:

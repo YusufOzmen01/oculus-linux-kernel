@@ -424,6 +424,10 @@ adreno_drawctxt_create(struct kgsl_device_private *dev_priv,
 	/* set the context ringbuffer */
 	drawctxt->rb = adreno_ctx_get_rb(adreno_dev, drawctxt);
 
+	dev_info(device->dev, "qkx: %s[%d] context flags 0x%lx rb %d\n",
+		current->comm, current->pid, drawctxt->base.flags,
+		drawctxt->rb->id);
+
 	/*
 	 * Set up the plist node for the dispatcher.  Insert the node into the
 	 * drawctxt pending list based on priority.

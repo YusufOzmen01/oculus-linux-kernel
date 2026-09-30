@@ -12,6 +12,7 @@
 #define DEBUG		/* Enable initcall_debug */
 
 #include <linux/types.h>
+#include <linux/qkx_diag.h>
 #include <linux/extable.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
@@ -64,6 +65,7 @@
 #include <linux/pid_namespace.h>
 #include <linux/device.h>
 #include <linux/kthread.h>
+#include <linux/sched/debug.h>
 #include <linux/sched.h>
 #include <linux/sched/init.h>
 #include <linux/signal.h>
@@ -553,6 +555,14 @@ static void __init mm_init(void)
 	pti_init();
 }
 
+bool qkx_stallmon;
+
+static int __init qkx_stallmon_setup(char *str)
+{
+	return kstrtobool(str, &qkx_stallmon);
+}
+early_param("qkx_stallmon", qkx_stallmon_setup);
+
 #define QKX_LOG_PHYS 0x9ba80000ULL
 #define QKX_LOG_SIZE 0x10000
 #define QKX_LOG_MAGIC 0x514b584c
@@ -571,7 +581,7 @@ static void qkx_log_write(struct console *con, const char *s, unsigned int count
 	struct qkx_log_header __iomem *h = qkx_log;
 	u32 pos, wraps;
 	unsigned int i;
-	const u32 capacity = QKX_LOG_SIZE - sizeof(*h);
+	const u32 capacity = QKX_LOG_SIZE - QKX_CTXAREA_SIZE - sizeof(*h);
 
 	if (!h || readl_relaxed(&h->magic) != QKX_LOG_MAGIC)
 		return;
@@ -613,6 +623,12 @@ static void __init qkx_log_console_init(void)
 	writel_relaxed(0, &h->write_pos);
 	writel_relaxed(0, &h->wraps);
 	writel_relaxed(QKX_LOG_MAGIC, &h->magic);
+	qkx_ctxarea = qkx_log + QKX_LOG_SIZE - QKX_CTXAREA_SIZE;
+	writel_relaxed(NR_CPUS, &qkx_ctxarea->nr_cpus);
+	writel_relaxed(QKX_CTX_NR, &qkx_ctxarea->nr_kinds);
+	writel_relaxed(sizeof(struct qkx_ctx), &qkx_ctxarea->rec_size);
+	writeq_relaxed((u64)_text, &qkx_ctxarea->text);
+	writel_relaxed(QKX_CTXAREA_MAGIC, &qkx_ctxarea->magic);
 	wmb();
 	register_console(&qkx_log_console);
 }
@@ -1053,6 +1069,9 @@ static int qkx_panic_warm_reset(struct notifier_block *nb,
 	 * panicreporter loads rdbg and can itself panic before retained RAM is
 	 * collected. qpnp_pon and msm-poweroff are ready by the initcall stages
 	 * where diagnostic target panics have occurred. */
+	/* Hang diagnosis: put every blocked task's stack in the retained ring. */
+	console_verbose();
+	show_state_filter(TASK_UNINTERRUPTIBLE);
 	qkx_minimal_warm_reset();
 	return NOTIFY_DONE;
 }

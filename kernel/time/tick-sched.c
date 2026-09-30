@@ -19,6 +19,7 @@
 #include <linux/percpu.h>
 #include <linux/nmi.h>
 #include <linux/profile.h>
+#include <linux/qkx_diag.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/clock.h>
 #include <linux/sched/stat.h>
@@ -150,6 +151,7 @@ static void tick_sched_do_timer(struct tick_sched *ts, ktime_t now)
 
 static void tick_sched_handle(struct tick_sched *ts, struct pt_regs *regs)
 {
+	qkx_tick_note(instruction_pointer(regs), user_mode(regs));
 #ifdef CONFIG_NO_HZ_COMMON
 	/*
 	 * When we are idle and the tick is stopped, we have to touch

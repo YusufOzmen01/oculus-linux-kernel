@@ -13,6 +13,7 @@
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
+#include <linux/qkx_diag.h>
 
 #include <trace/events/irq.h>
 
@@ -146,7 +147,16 @@ irqreturn_t __handle_irq_event_percpu(struct irq_desc *desc, unsigned int *flags
 		irqreturn_t res;
 
 		trace_irq_handler_entry(irq, action);
-		res = action->handler(irq, action->dev_id);
+		if (qkx_stallmon) {
+			struct qkx_ctx save;
+
+			qkx_ctx_enter(QKX_CTX_IRQ, &save, action->handler, irq,
+				      action->name);
+			res = action->handler(irq, action->dev_id);
+			qkx_ctx_exit(QKX_CTX_IRQ, &save);
+		} else {
+			res = action->handler(irq, action->dev_id);
+		}
 		trace_irq_handler_exit(irq, action, res);
 
 		if (WARN_ONCE(!irqs_disabled(),"irq %u handler %pF enabled interrupts\n",

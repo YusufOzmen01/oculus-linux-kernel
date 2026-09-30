@@ -152,7 +152,7 @@ preserve_boot_args:
 						// MMU off
 
 	mov	x1, #0x20			// 4 x 8 bytes
-	b	__inval_dcache_area		// tail call
+	b	__qkx_raw_inval_dcache_area		// tail call
 ENDPROC(preserve_boot_args)
 
 /*
@@ -302,7 +302,7 @@ __create_page_tables:
 	adrp	x0, idmap_pg_dir
 	adrp	x1, swapper_pg_end
 	sub	x1, x1, x0
-	bl	__inval_dcache_area
+	bl	__qkx_raw_inval_dcache_area
 
 	/*
 	 * Clear the idmap and swapper page tables.
@@ -402,7 +402,7 @@ __create_page_tables:
 	adrp	x1, swapper_pg_end
 	sub	x1, x1, x0
 	dmb	sy
-	bl	__inval_dcache_area
+	bl	__qkx_raw_inval_dcache_area
 
 	ret	x28
 ENDPROC(__create_page_tables)

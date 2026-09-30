@@ -4,6 +4,7 @@
 #define pr_fmt(fmt) "clk: %s: " fmt, __func__
 
 #include <linux/bitops.h>
+#include <linux/delay.h>
 #include <linux/clk.h>
 #include <linux/clk-provider.h>
 #include <linux/err.h>
@@ -402,6 +403,37 @@ static const struct of_device_id gpu_cc_kona_match_table[] = {
 };
 MODULE_DEVICE_TABLE(of, gpu_cc_kona_match_table);
 
+/* qkx_gpu_reset=1: after kexec the GMU, its RSC and the GPU PDC keep whatever
+ * sleep/TCS state the previous kernel's GMU slumber left; a cold boot resets
+ * them. Pulse the documented GPU_CC block resets before kgsl first boots the
+ * GMU so it starts from the same state as on a cold boot. */
+static bool qkx_gpu_reset;
+static int __init qkx_gpu_reset_setup(char *s)
+{
+	return kstrtobool(s, &qkx_gpu_reset);
+}
+early_param("qkx_gpu_reset", qkx_gpu_reset_setup);
+
+static void qkx_gpu_cc_reset(struct device *dev, struct regmap *regmap)
+{
+	static const struct { const char *name; u32 off; } bcr[] = {
+		{ "gx", 0x1008 }, { "acd", 0x1160 }, { "gmu", 0x111c },
+		{ "cx", 0x1068 },
+	};
+	unsigned int i, before, after;
+
+	for (i = 0; i < ARRAY_SIZE(bcr); i++) {
+		regmap_read(regmap, bcr[i].off, &before);
+		regmap_update_bits(regmap, bcr[i].off, BIT(0), BIT(0));
+		udelay(20);
+		regmap_update_bits(regmap, bcr[i].off, BIT(0), 0);
+		udelay(20);
+		regmap_read(regmap, bcr[i].off, &after);
+		dev_info(dev, "qkx: pulsed %s BCR 0x%x (%08x -> %08x)\n",
+			 bcr[i].name, bcr[i].off, before, after);
+	}
+}
+
 static int gpu_cc_kona_probe(struct platform_device *pdev)
 {
 	struct regmap *regmap;
@@ -427,6 +459,9 @@ static int gpu_cc_kona_probe(struct platform_device *pdev)
 				"Unable to get vdd_mx regulator\n");
 		return PTR_ERR(vdd_mx.regulator[0]);
 	}
+
+	if (qkx_gpu_reset)
+		qkx_gpu_cc_reset(&pdev->dev, regmap);
 
 	clk_lucid_pll_configure(&gpu_cc_pll1, regmap, &gpu_cc_pll1_config);
 

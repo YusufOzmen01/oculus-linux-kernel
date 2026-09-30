@@ -18,6 +18,7 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/qkx_diag.h>
 
 #include <soc/qcom/cmd-db.h>
 #include <soc/qcom/tcs.h>
@@ -76,6 +77,13 @@ static const char * const accl_str[] = {
 	"", "", "", "CLK", "VREG", "BUS",
 };
 
+static bool qkx_rpmh_cleanup;
+static int __init qkx_rpmh_cleanup_setup(char *s)
+{
+	return kstrtobool(s, &qkx_rpmh_cleanup);
+}
+early_param("qkx_rpmh_cleanup", qkx_rpmh_cleanup_setup);
+
 bool rpmh_standalone;
 static struct rsc_drv *__rsc_drv[2];
 static int __rsc_count;
@@ -101,12 +109,24 @@ static void write_tcs_reg(struct rsc_drv *drv, int reg, int tcs_id, u32 data)
 static void write_tcs_reg_sync(struct rsc_drv *drv, int reg, int tcs_id,
 			       u32 data)
 {
+	int qkx_iters = 0;
+
 	writel(data, drv->tcs_base + reg + RSC_DRV_TCS_OFFSET * tcs_id);
 	for (;;) {
 		if (data == readl(drv->tcs_base + reg +
 				  RSC_DRV_TCS_OFFSET * tcs_id))
 			break;
 		udelay(1);
+		/*
+		 * qkx: unbounded readback loop, possibly with drv->lock
+		 * held.  Breadcrumb long spins; behaviour is unchanged.
+		 */
+		if (qkx_stallmon && (++qkx_iters == 1000 ||
+				     (qkx_iters % 500000) == 0))
+			pr_err("qkx-stall: tcs reg-sync loop drv=%s reg=%#x "
+				"tcs=%d data=%#x iters=%d caller=%pS\n",
+				drv->name, reg, tcs_id, data, qkx_iters,
+				__builtin_return_address(0));
 	}
 }
 
@@ -265,6 +285,8 @@ static irqreturn_t tcs_tx_done(int irq, void *p)
 	unsigned long irq_status;
 	const struct tcs_request *req;
 	struct tcs_cmd *cmd;
+
+	drv->qkx_done++;
 
 	irq_status = read_tcs_reg(drv, RSC_DRV_IRQ_STATUS, 0, 0);
 
@@ -452,6 +474,7 @@ done_write:
 int rpmh_rsc_send_data(struct rsc_drv *drv, const struct tcs_request *msg)
 {
 	int ret;
+	int qkx_retries = 0;
 
 	if (!msg || !msg->cmds || !msg->num_cmds ||
 	    msg->num_cmds > MAX_RPMH_PAYLOAD) {
@@ -466,6 +489,18 @@ int rpmh_rsc_send_data(struct rsc_drv *drv, const struct tcs_request *msg)
 			pr_info_ratelimited("DRV:%s TCS Busy, retrying RPMH message send: addr=%#x\n",
 					    drv->name, msg->cmds[0].addr);
 #endif /* QCOM_RPMH_QGKI_DEBUG */
+			/*
+			 * qkx: unbounded retry loop with no schedule point.
+			 * Breadcrumb long spins with the completion count.
+			 */
+			if (qkx_stallmon && (++qkx_retries == 1000 ||
+				     (qkx_retries % 200000) == 0))
+				pr_err("qkx-stall: rpmh send EBUSY spin "
+					"drv=%s addr=%#x retries=%d "
+					"done=%llu caller=%pS\n",
+					drv->name, msg->cmds[0].addr,
+					qkx_retries, drv->qkx_done,
+					__builtin_return_address(0));
 			udelay(10);
 		}
 	} while (ret == -EBUSY);
@@ -887,6 +922,32 @@ static int rpmh_rsc_probe(struct platform_device *pdev)
 		return irq;
 
 	drv->irq = irq;
+
+	if (qkx_rpmh_cleanup) {
+		u32 inherited_irq = read_tcs_reg(drv, RSC_DRV_IRQ_STATUS, 0, 0);
+		u32 inherited_en = read_tcs_reg(drv, RSC_DRV_IRQ_ENABLE, 0, 0);
+		unsigned int tcs_id;
+
+		/* Preserve sleep/wake TCS payloads written by rpmh_flush().  Only
+		 * quiesce transient active-AMC state inherited from the old kernel. */
+		write_tcs_reg(drv, RSC_DRV_IRQ_ENABLE, 0, 0);
+		for (tcs_id = 0; tcs_id < drv->num_tcs; tcs_id++) {
+			u32 ctl;
+
+			if (!(drv->tcs[ACTIVE_TCS].mask & BIT(tcs_id)))
+				continue;
+			ctl = read_tcs_reg(drv, RSC_DRV_CONTROL, tcs_id, 0);
+			ctl &= ~(TCS_AMC_MODE_TRIGGER | TCS_AMC_MODE_ENABLE);
+			write_tcs_reg(drv, RSC_DRV_CONTROL, tcs_id, ctl);
+			write_tcs_reg(drv, RSC_DRV_CMD_ENABLE, tcs_id, 0);
+		}
+		write_tcs_reg(drv, RSC_DRV_IRQ_CLEAR, 0,
+			      inherited_irq | drv->tcs[ACTIVE_TCS].mask);
+		mb();
+		dev_info(&pdev->dev,
+			 "qkx: cleaned inherited active TCS state irq=%#x enable=%#x mask=%#lx\n",
+			 inherited_irq, inherited_en, drv->tcs[ACTIVE_TCS].mask);
+	}
 
 	ret = devm_request_irq(&pdev->dev, irq, tcs_tx_done,
 			       IRQF_TRIGGER_HIGH | IRQF_NO_SUSPEND,

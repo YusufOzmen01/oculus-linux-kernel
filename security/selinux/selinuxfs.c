@@ -132,6 +132,10 @@ static ssize_t sel_read_enforce(struct file *filp, char __user *buf,
 }
 
 #ifdef CONFIG_SECURITY_SELINUX_DEVELOP
+/* Off unless qkx_selinux_permissive=1 is on the command line. */
+static bool qkx_selinux_permissive;
+core_param(qkx_selinux_permissive, qkx_selinux_permissive, bool, 0444);
+
 static ssize_t sel_write_enforce(struct file *file, const char __user *buf,
 				 size_t count, loff_t *ppos)
 
@@ -158,6 +162,17 @@ static ssize_t sel_write_enforce(struct file *file, const char __user *buf,
 		goto out;
 
 	new_value = !!new_value;
+
+	/*
+	 * A user-build init ignores androidboot.selinux and always enforces,
+	 * which cuts the qkx debug shell (kernel domain) off from its sockets
+	 * and /dev/kmsg. When asked, keep SELinux permissive for the kexec
+	 * target; the write still succeeds so init carries on.
+	 */
+	if (new_value && qkx_selinux_permissive) {
+		pr_info_once("SELinux: qkx: ignoring enforce request, staying permissive\n");
+		new_value = 0;
+	}
 
 	old_value = enforcing_enabled(state);
 	if (new_value != old_value) {

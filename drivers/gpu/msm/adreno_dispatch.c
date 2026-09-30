@@ -2199,6 +2199,7 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 	if (!(fault & ADRENO_IOMMU_PAGE_FAULT) &&
 		(adreno_is_a5xx(adreno_dev) || adreno_is_a6xx(adreno_dev)) &&
 		smmu_stalled) {
+		kgsl_iommu_qkx_dump_faults(&device->mmu);
 		mutex_unlock(&device->mutex);
 		dev_err(device->dev, "SMMU is stalled without a pagefault\n");
 		return -EBUSY;
@@ -2575,8 +2576,11 @@ static void _adreno_dispatch_check_timeout(struct adreno_device *adreno_dev,
 	if (drawobj->context->flags & KGSL_CONTEXT_NO_FAULT_TOLERANCE)
 		return;
 
-	pr_context(device, drawobj->context, "gpu timeout ctx %d ts %d\n",
-		drawobj->context->id, drawobj->timestamp);
+	pr_context(device, drawobj->context,
+		"gpu timeout ctx %d ts %d flags 0x%lx rb %d\n",
+		drawobj->context->id, drawobj->timestamp,
+		drawobj->context->flags,
+		ADRENO_CONTEXT(drawobj->context)->rb->id);
 
 	adreno_set_gpu_fault(adreno_dev, ADRENO_TIMEOUT_FAULT);
 

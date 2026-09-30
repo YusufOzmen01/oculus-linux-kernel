@@ -3,6 +3,7 @@
  * Copyright (c) 2010-2020, The Linux Foundation. All rights reserved.
  */
 
+#include <linux/qkx_diag.h>
 #include <linux/slab.h>
 #include <linux/io.h>
 #include <linux/module.h>
@@ -348,7 +349,7 @@ static int allocate_extra_arg_buffer(struct scm_desc *desc, gfp_t flags)
 	return 0;
 }
 
-static int __scm_call2(u32 fn_id, struct scm_desc *desc, bool retry)
+static int __qkx_scm_call2(u32 fn_id, struct scm_desc *desc, bool retry)
 {
 	int arglen = desc->arginfo & 0xf;
 	int ret, retry_count = 0;
@@ -431,6 +432,20 @@ out:
  * of by scm_call2; however, callers are responsible for any other cached
  * buffers passed over to the secure world.
  */
+static int __scm_call2(u32 fn_id, struct scm_desc *desc, bool retry)
+{
+	struct qkx_ctx save;
+	int ret;
+
+	if (!qkx_stallmon)
+		return __qkx_scm_call2(fn_id, desc, retry);
+	qkx_ctx_enter(QKX_CTX_SCM, &save, __builtin_return_address(0), fn_id,
+		      "scm_call2");
+	ret = __qkx_scm_call2(fn_id, desc, retry);
+	qkx_ctx_exit(QKX_CTX_SCM, &save);
+	return ret;
+}
+
 int scm_call2(u32 fn_id, struct scm_desc *desc)
 {
 	return __scm_call2(fn_id, desc, true);
@@ -457,7 +472,7 @@ EXPORT_SYMBOL(scm_call2_noretry);
  * secure world syscall can be executed in such a context and can complete
  * in a timely manner.
  */
-int scm_call2_atomic(u32 fn_id, struct scm_desc *desc)
+static int __qkx_scm_call2_atomic(u32 fn_id, struct scm_desc *desc)
 {
 	int arglen = desc->arginfo & 0xf;
 	int ret;
@@ -735,3 +750,17 @@ early_initcall(scm_mem_protection_init);
 #endif
 
 #endif
+
+int scm_call2_atomic(u32 fn_id, struct scm_desc *desc)
+{
+	struct qkx_ctx save;
+	int ret;
+
+	if (!qkx_stallmon)
+		return __qkx_scm_call2_atomic(fn_id, desc);
+	qkx_ctx_enter(QKX_CTX_SCM, &save, __builtin_return_address(0), fn_id,
+		      "scm_call2_atomic");
+	ret = __qkx_scm_call2_atomic(fn_id, desc);
+	qkx_ctx_exit(QKX_CTX_SCM, &save);
+	return ret;
+}

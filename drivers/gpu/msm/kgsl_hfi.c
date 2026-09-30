@@ -223,6 +223,7 @@ void hfi_init(struct gmu_device *gmu)
 	}
 
 	mutex_init(&hfi->cmdq_mutex);
+	mutex_init(&hfi->req_mutex);
 }
 
 #define HDR_CMP_SEQNUM(out_hdr, in_hdr) \
@@ -297,9 +298,17 @@ static int hfi_send_cmd(struct gmu_device *gmu, uint32_t queue_idx,
 
 	ret_cmd->sent_hdr = cmd[0];
 
+	/*
+	 * The ACK interrupt and response queue are shared by all synchronous
+	 * requests. Serializing only the queue write lets concurrent callers
+	 * clear or consume each other's ACK. Keep the whole transaction atomic.
+	 */
+	mutex_lock(&hfi->req_mutex);
 	rc = hfi_queue_write(gmu, queue_idx, cmd);
-	if (rc)
+	if (rc) {
+		mutex_unlock(&hfi->req_mutex);
 		return rc;
+	}
 
 	rc = poll_adreno_gmu_reg(adreno_dev, ADRENO_REG_GMU_GMU2HOST_INTR_INFO,
 		HFI_IRQ_MSGQ_MASK, HFI_IRQ_MSGQ_MASK, HFI_RSP_TIMEOUT);
@@ -308,6 +317,23 @@ static int hfi_send_cmd(struct gmu_device *gmu, uint32_t queue_idx,
 		dev_err(&gmu->pdev->dev,
 		"Timed out waiting on ack for 0x%8.8x (id %d, sequence %d)\n",
 		cmd[0], MSG_HDR_GET_ID(*cmd), MSG_HDR_GET_SEQNUM(*cmd));
+		if (adreno_is_a650_family(adreno_dev)) {
+			unsigned int st0, busy, t0, t1, t2, t3, req, ack;
+
+			/* Where is the GMU's RPMh request stuck? */
+			adreno_rscc_regread(adreno_dev, 0x4, &st0);
+			adreno_rscc_regread(adreno_dev, 0x101, &busy);
+			adreno_rscc_regread(adreno_dev, 0x346, &t0);
+			adreno_rscc_regread(adreno_dev, 0x3ee, &t1);
+			adreno_rscc_regread(adreno_dev, 0x496, &t2);
+			adreno_rscc_regread(adreno_dev, 0x53e, &t3);
+			gmu_core_regread(hfi->kgsldev, 0x23B07, &req);
+			gmu_core_regread(hfi->kgsldev, 0x23B08, &ack);
+			dev_err(&gmu->pdev->dev,
+				"qkx: RSC st0=%08x seqbusy=%08x tcs=%08x/%08x/%08x/%08x ctrl req=%08x ack=%08x\n",
+				st0, busy, t0, t1, t2, t3, req, ack);
+		}
+		mutex_unlock(&hfi->req_mutex);
 		return rc;
 	}
 
@@ -316,6 +342,7 @@ static int hfi_send_cmd(struct gmu_device *gmu, uint32_t queue_idx,
 		HFI_IRQ_MSGQ_MASK);
 
 	hfi_process_queue(gmu, HFI_MSG_ID, ret_cmd);
+	mutex_unlock(&hfi->req_mutex);
 
 	return rc;
 }

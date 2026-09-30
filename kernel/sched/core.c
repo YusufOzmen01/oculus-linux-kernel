@@ -6,6 +6,7 @@
  *  Copyright (C) 1991-2002  Linus Torvalds
  */
 #include "sched.h"
+#include <linux/qkx_diag.h>
 
 #include <linux/nospec.h>
 
@@ -3452,6 +3453,9 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	struct mm_struct *mm = rq->prev_mm;
 	long prev_state;
 
+	if (qkx_stallmon)
+		qkx_stall_note_switch();
+
 	/*
 	 * The previous task will have left us with a preempt_count of 2
 	 * because it left us after:
@@ -3861,6 +3865,9 @@ void scheduler_tick(void)
 	u32 old_load;
 	struct related_thread_group *grp;
 	unsigned int flag = 0;
+
+	if (qkx_stallmon)
+		qkx_stall_note_tick();
 
 	sched_clock_tick();
 

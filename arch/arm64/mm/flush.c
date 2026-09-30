@@ -24,6 +24,45 @@
 #include <asm/cacheflush.h>
 #include <asm/cache.h>
 #include <asm/tlbflush.h>
+#include <linux/qkx_diag.h>
+#include <linux/preempt.h>
+
+extern void __qkx_raw_flush_dcache_area(void *addr, size_t len);
+extern void __qkx_raw_inval_dcache_area(void *addr, size_t len);
+extern void __qkx_raw_clean_dcache_area_poc(void *addr, size_t len);
+
+static __always_inline void qkx_cache_op(void *addr, size_t len, int op,
+					void (*raw)(void *, size_t))
+{
+	struct qkx_ctx save;
+
+	if (!qkx_stallmon) {
+		raw(addr, len);
+		return;
+	}
+	preempt_disable();
+	qkx_ctx_enter(QKX_CTX_CACHE, &save, __builtin_return_address(0), op,
+		      op == 0 ? "flush" : op == 1 ? "invalidate" : "clean-poc");
+	qkx_ctx_set_args(QKX_CTX_CACHE, (u64)addr, len);
+	raw(addr, len);
+	qkx_ctx_exit(QKX_CTX_CACHE, &save);
+	preempt_enable();
+}
+
+void __flush_dcache_area(void *addr, size_t len)
+{
+	qkx_cache_op(addr, len, 0, __qkx_raw_flush_dcache_area);
+}
+
+void __inval_dcache_area(void *addr, size_t len)
+{
+	qkx_cache_op(addr, len, 1, __qkx_raw_inval_dcache_area);
+}
+
+void __clean_dcache_area_poc(void *addr, size_t len)
+{
+	qkx_cache_op(addr, len, 2, __qkx_raw_clean_dcache_area_poc);
+}
 
 void sync_icache_aliases(void *kaddr, unsigned long len)
 {

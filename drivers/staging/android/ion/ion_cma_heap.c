@@ -7,6 +7,7 @@
  */
 
 #include <linux/device.h>
+#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/err.h>
@@ -17,6 +18,15 @@
 
 #include "ion.h"
 #include "ion_secure_util.h"
+
+static bool qkx_cma_trace;
+
+static int __init qkx_cma_trace_setup(char *str)
+{
+	qkx_cma_trace = true;
+	return 0;
+}
+early_param("qkx_cma_trace", qkx_cma_trace_setup);
 
 struct ion_cma_heap {
 	struct ion_heap heap;
@@ -54,7 +64,14 @@ static int ion_cma_allocate(struct ion_heap *heap, struct ion_buffer *buffer,
 	if (align > CONFIG_CMA_ALIGNMENT)
 		align = CONFIG_CMA_ALIGNMENT;
 
+	if (qkx_cma_trace)
+		pr_info("qkx-cma: begin heap=%s len=%lu pages=%lu align=%lu pid=%d comm=%s\n",
+			heap->name, len, nr_pages, align, current->pid,
+			current->comm);
 	pages = cma_alloc(cma_heap->cma, nr_pages, align, false);
+	if (qkx_cma_trace)
+		pr_info("qkx-cma: end heap=%s pages=%lu result=%px pid=%d\n",
+			heap->name, nr_pages, pages, current->pid);
 	if (!pages)
 		return -ENOMEM;
 

@@ -37,6 +37,7 @@
 #ifndef _UFSHCD_H
 #define _UFSHCD_H
 
+#include <linux/qkx_diag.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/hrtimer.h>
@@ -1198,10 +1199,43 @@ static inline bool ufshcd_is_crypto_supported(struct ufs_hba *hba)
 	return !!(hba->capabilities & MASK_CRYPTO_SUPPORT);
 }
 
-#define ufshcd_writel(hba, val, reg)	\
-	writel((val), (hba)->mmio_base + (reg))
-#define ufshcd_readl(hba, reg)	\
-	readl((hba)->mmio_base + (reg))
+static __always_inline void qkx_ufshcd_writel(struct ufs_hba *hba, u32 val,
+					      u32 reg)
+{
+	struct qkx_ctx save;
+
+	if (!qkx_stallmon) {
+		writel(val, hba->mmio_base + reg);
+		return;
+	}
+	preempt_disable();
+	qkx_ctx_enter(QKX_CTX_UFS, &save, __builtin_return_address(0), 1,
+		      "ufs-write");
+	qkx_ctx_set_args(QKX_CTX_UFS, reg, val);
+	writel(val, hba->mmio_base + reg);
+	qkx_ctx_exit(QKX_CTX_UFS, &save);
+	preempt_enable();
+}
+
+static __always_inline u32 qkx_ufshcd_readl(struct ufs_hba *hba, u32 reg)
+{
+	struct qkx_ctx save;
+	u32 val;
+
+	if (!qkx_stallmon)
+		return readl(hba->mmio_base + reg);
+	preempt_disable();
+	qkx_ctx_enter(QKX_CTX_UFS, &save, __builtin_return_address(0), 0,
+		      "ufs-read");
+	qkx_ctx_set_args(QKX_CTX_UFS, reg, 0);
+	val = readl(hba->mmio_base + reg);
+	qkx_ctx_exit(QKX_CTX_UFS, &save);
+	preempt_enable();
+	return val;
+}
+
+#define ufshcd_writel(hba, val, reg) qkx_ufshcd_writel((hba), (val), (reg))
+#define ufshcd_readl(hba, reg) qkx_ufshcd_readl((hba), (reg))
 
 /**
  * ufshcd_rmwl - read modify write into a register
