@@ -1704,7 +1704,7 @@ static void start_rx_sequencer(struct uart_port *uport)
 	 * TX succeeds but the MCU's reply never reaches memory. A stock/target
 	 * register diff plus the 4738-byte MCU `help` response verifies that these
 	 * are the two required handoff bits. Reapply after every RX start/resume. */
-	if (qkx_uart_dma_cleanup) {
+	if (qkx_uart_dma_cleanup && uport->line == 14) {
 		geni_write_reg_nolog(BIT(4), uport->membase,
 					SE_DMA_RX_IRQ_EN_SET);
 		geni_write_reg_nolog(UART_MANUAL_RFR_EN, uport->membase,

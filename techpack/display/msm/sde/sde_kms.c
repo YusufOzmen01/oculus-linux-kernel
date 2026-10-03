@@ -752,6 +752,18 @@ static int _sde_kms_release_splash_buffer(struct sde_kms *sde_kms,
 	pfn_start = mem_addr >> PAGE_SHIFT;
 	pfn_end = (mem_addr + splash_buffer_size) >> PAGE_SHIFT;
 
+	/* A no-map carveout is not linear-mapped HLOS RAM. In particular,
+	 * retained splash buffers can still belong to firmware after kexec.
+	 * Do not hand such pages to the buddy allocator: free_reserved_page
+	 * assumes they have a usable linear mapping. */
+	for (pfn_idx = pfn_start; pfn_idx < pfn_end; pfn_idx++) {
+		if (!pfn_valid(pfn_idx)) {
+			SDE_INFO("preserving unmapped splash memory %#x+%#x\n",
+				mem_addr, splash_buffer_size);
+			return 0;
+		}
+	}
+
 	ret = memblock_free(mem_addr, splash_buffer_size);
 	if (ret) {
 		SDE_ERROR("continuous splash memory free failed:%d\n", ret);

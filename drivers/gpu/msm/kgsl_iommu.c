@@ -744,6 +744,7 @@ static int kgsl_iommu_qkx_fault_poll(void *data)
 	struct kgsl_iommu_context *ctxs[] = { &iommu->user_context,
 		&iommu->secure_context, &iommu->lpac_context };
 	struct kgsl_device *device = KGSL_MMU_DEVICE(mmu);
+	unsigned long last_wake[ARRAY_SIZE(ctxs)] = { 0 };
 
 	while (!kthread_should_stop()) {
 		int i;
@@ -758,8 +759,18 @@ static int kgsl_iommu_qkx_fault_poll(void *data)
 
 			if (!ctx->regbase || ctx->irq <= 0)
 				continue;
-			if (kgsl_iommu_latch_missed_fault(ctx))
+			if (kgsl_iommu_latch_missed_fault(ctx)) {
+				last_wake[i] = jiffies;
 				irq_wake_thread(ctx->irq, ctx);
+			} else if (atomic_read(&ctx->outstanding_fault_count) > 0 &&
+				KGSL_IOMMU_GET_CTX_REG(ctx, KGSL_IOMMU_CTX_FSR) &&
+				time_after(jiffies, last_wake[i] + msecs_to_jiffies(10))) {
+				last_wake[i] = jiffies;
+				dev_err_ratelimited(device->dev,
+					"qkx: cb%d fault stuck; re-waking handler\n",
+					ctx->cb_num);
+				irq_wake_thread(ctx->irq, ctx);
+			}
 		}
 
 		usleep_range(1000, 1500);
@@ -1278,7 +1289,7 @@ static irqreturn_t kgsl_iommu_context_fault_thread(int irq, void *data)
 again:
 	spin_lock_irqsave(&ctx->fault_lock, flags);
 	memcpy(&fault_regs, &ctx->fault_regs, sizeof(fault_regs));
-	atomic_dec(&ctx->outstanding_fault_count);
+	atomic_add_unless(&ctx->outstanding_fault_count, -1, 0);
 	spin_unlock_irqrestore(&ctx->fault_lock, flags);
 
 	ret = kgsl_iommu_fault_handler(ctx, &fault_regs);

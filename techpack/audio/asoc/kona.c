@@ -8356,8 +8356,9 @@ static int msm_populate_dai_link_component_of_node(
 						"asoc-platform-names",
 						dai_link[i].platform_name);
 			if (index < 0) {
-				dev_err(cdev, "%s: No match found for platform name: %s\n",
-					__func__, dai_link[i].platform_name);
+				dev_err(cdev, "%s: link %d/%d (%s): No match found for platform name: %s\n",
+					__func__, i, card->num_links,
+					dai_link[i].name, dai_link[i].platform_name);
 				ret = index;
 				goto err;
 			}

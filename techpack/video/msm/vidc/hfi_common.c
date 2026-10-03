@@ -28,10 +28,31 @@
 #include <linux/dma-mapping.h>
 #include <linux/fastcvpd.h>
 #include <linux/reset.h>
+#include <linux/init.h>
 #include "hfi_packetization.h"
 #include "msm_vidc_debug.h"
 #include "hfi_common.h"
 #include "hfi_io_common.h"
+
+/* Kexec diagnostic: let PIL replace retained firmware before VIDC clocks
+ * expose the previous firmware's queue accesses to the new IOMMU domains. */
+static bool qkx_venus_reload_first;
+static bool qkx_venus_no_pc;
+static int __init qkx_venus_no_pc_setup(char *str)
+{
+	qkx_venus_no_pc = true;
+	return 0;
+}
+early_param("qkx_venus_no_pc", qkx_venus_no_pc_setup);
+static int __init qkx_venus_reload_first_setup(char *str)
+{
+	qkx_venus_reload_first = true;
+	/* Keep video LLCC slices out of the kexec handoff until their retained
+	 * state can be safely reset. Use the driver's existing cache policy. */
+	msm_vidc_syscache_disable = true;
+	return 0;
+}
+early_param("qkx_venus_reload_first", qkx_venus_reload_first_setup);
 
 #define FIRMWARE_SIZE			0X00A00000
 #define REG_ADDR_OFFSET_BITMASK	0x000FFFFF
@@ -2016,7 +2037,8 @@ static int __sys_set_power_control(struct venus_hfi_device *device,
 	if (!supported)
 		return 0;
 
-	call_hfi_pkt_op(device, sys_power_control, pkt, enable);
+	call_hfi_pkt_op(device, sys_power_control, pkt,
+		qkx_venus_no_pc ? false : enable);
 	if (__iface_cmdq_write(device, pkt, sid))
 		return -ENOTEMPTY;
 	return 0;
@@ -4053,6 +4075,8 @@ static int __enable_hw_power_collapse(struct venus_hfi_device *device, u32 sid)
 {
 	int rc = 0;
 
+	if (qkx_venus_no_pc)
+		return 0;
 	rc = __hand_off_regulators(device, sid);
 	if (rc)
 		s_vpr_e(sid, "%s: Failed to enable HW power collapse %d\n",
@@ -4321,10 +4345,14 @@ static int __venus_power_on(struct venus_hfi_device *device, u32 sid)
 		goto fail_enable_gdsc;
 	}
 
-	rc = call_venus_op(device, reset_ahb2axi_bridge, device, sid);
-	if (rc) {
-		s_vpr_e(sid, "Failed to reset ahb2axi: %d\n", rc);
-		goto fail_enable_clks;
+	/* PIL has already initialized the core for reload-first bring-up.
+	 * Do not immediately reset that authenticated firmware's hardware state. */
+	if (!(qkx_venus_reload_first && device->resources.fw.cookie)) {
+		rc = call_venus_op(device, reset_ahb2axi_bridge, device, sid);
+		if (rc) {
+			s_vpr_e(sid, "Failed to reset ahb2axi: %d\n", rc);
+			goto fail_enable_clks;
+		}
 	}
 
 	rc = __prepare_enable_clks(device, sid);
@@ -4498,6 +4526,9 @@ static int __load_fw(struct venus_hfi_device *device)
 {
 	int rc = 0;
 
+	if (qkx_venus_no_pc)
+		device->res->sw_power_collapsible = false;
+
 	/* Initialize resources */
 	rc = __init_resources(device, device->res);
 	if (rc) {
@@ -4512,9 +4543,25 @@ static int __load_fw(struct venus_hfi_device *device)
 	}
 	trace_msm_v4l2_vidc_fw_load_start("msm_v4l2_vidc venus_fw load start");
 
+	if (qkx_venus_reload_first && !device->res->firmware_base &&
+	    !device->resources.fw.cookie) {
+		d_vpr_e("qkx: loading Venus through PIL before VIDC power-on\n");
+		device->resources.fw.cookie = subsystem_get_with_fwname("venus",
+			device->res->fw_name);
+		if (IS_ERR_OR_NULL(device->resources.fw.cookie)) {
+			device->resources.fw.cookie = NULL;
+			rc = -ENOMEM;
+			goto fail_venus_power_on;
+		}
+	}
+
 	rc = __venus_power_on(device, DEFAULT_SID);
 	if (rc) {
 		d_vpr_e("Failed to power on venus in in load_fw\n");
+		if (qkx_venus_reload_first && device->resources.fw.cookie) {
+			subsystem_put(device->resources.fw.cookie);
+			device->resources.fw.cookie = NULL;
+		}
 		goto fail_venus_power_on;
 	}
 
