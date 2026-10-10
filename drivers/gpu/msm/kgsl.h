@@ -430,10 +430,15 @@ long kgsl_ioctl_timeline_signal(struct kgsl_device_private *dev_priv,
 		unsigned int cmd, void *data);
 long kgsl_ioctl_timeline_destroy(struct kgsl_device_private *dev_priv,
 		unsigned int cmd, void *data);
+long kgsl_ioctl_qkx_timeline_export(struct kgsl_device_private *dev_priv,
+		unsigned int cmd, void *data);
+void kgsl_timeline_release_owner(struct kgsl_device_private *dev_priv);
 
 long kgsl_ioctl_allow_uid_high_priority(struct kgsl_device_private *dev_priv,
 					unsigned int cmd, void *data);
 long kgsl_ioctl_allow_tid_maximum_priority(struct kgsl_device_private *dev_priv,
+					unsigned int cmd, void *data);
+long kgsl_ioctl_qkx_display_slot(struct kgsl_device_private *dev_priv,
 					unsigned int cmd, void *data);
 
 void kgsl_mem_entry_destroy(struct kref *kref);

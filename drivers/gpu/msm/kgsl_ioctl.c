@@ -98,10 +98,14 @@ static const struct kgsl_ioctl kgsl_ioctl_funcs[] = {
 			kgsl_ioctl_timeline_signal),
 	KGSL_IOCTL_FUNC(IOCTL_KGSL_TIMELINE_DESTROY,
 			kgsl_ioctl_timeline_destroy),
+	KGSL_IOCTL_FUNC(IOCTL_KGSL_QKX_TIMELINE_EXPORT,
+			kgsl_ioctl_qkx_timeline_export),
 	KGSL_IOCTL_FUNC(IOCTL_KGSL_ALLOW_UID_HIGH_PRIORITY,
 			kgsl_ioctl_allow_uid_high_priority),
 	KGSL_IOCTL_FUNC(IOCTL_KGSL_ALLOW_TID_MAXIMUM_PRIORITY,
 			kgsl_ioctl_allow_tid_maximum_priority),
+	KGSL_IOCTL_FUNC(IOCTL_KGSL_QKX_DISPLAY_SLOT,
+			kgsl_ioctl_qkx_display_slot),
 };
 
 long kgsl_ioctl_copy_in(unsigned int kernel_cmd, unsigned int user_cmd,

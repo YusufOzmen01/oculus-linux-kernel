@@ -142,7 +142,7 @@ static bool vmw_fence_enable_signaling(struct dma_fence *f)
 
 	u32 *fifo_mem = dev_priv->mmio_virt;
 	u32 seqno = vmw_mmio_read(fifo_mem + SVGA_FIFO_FENCE);
-	if (seqno - fence->base.seqno < VMW_FENCE_WRAP)
+	if (seqno - lower_32_bits(fence->base.seqno) < VMW_FENCE_WRAP)
 		return false;
 
 	vmw_fifo_ping_host(dev_priv, SVGA_SYNC_GENERIC);
@@ -448,7 +448,7 @@ static bool vmw_fence_goal_check_locked(struct vmw_fence_obj *fence)
 	fifo_mem = fman->dev_priv->mmio_virt;
 	goal_seqno = vmw_mmio_read(fifo_mem + SVGA_FIFO_FENCE_GOAL);
 	if (likely(fman->seqno_valid &&
-		   goal_seqno - fence->base.seqno < VMW_FENCE_WRAP))
+		   goal_seqno - lower_32_bits(fence->base.seqno) < VMW_FENCE_WRAP))
 		return false;
 
 	vmw_mmio_write(fence->base.seqno, fifo_mem + SVGA_FIFO_FENCE_GOAL);
@@ -468,7 +468,7 @@ static void __vmw_fences_update(struct vmw_fence_manager *fman)
 	seqno = vmw_mmio_read(fifo_mem + SVGA_FIFO_FENCE);
 rerun:
 	list_for_each_entry_safe(fence, next_fence, &fman->fence_list, head) {
-		if (seqno - fence->base.seqno < VMW_FENCE_WRAP) {
+		if (seqno - lower_32_bits(fence->base.seqno) < VMW_FENCE_WRAP) {
 			list_del_init(&fence->head);
 			dma_fence_signal_locked(&fence->base);
 			INIT_LIST_HEAD(&action_list);

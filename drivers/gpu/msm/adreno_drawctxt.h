@@ -49,6 +49,9 @@ struct kgsl_device_private;
  * @active_node: Linkage for nodes in active_list
  * @active_time: Time when this context last seen
  */
+/* tgid allowed to reserve the display slot (owner of a max-priority ctx) */
+extern pid_t adreno_qkx_slot_owner;
+
 struct adreno_context {
 	struct kgsl_context base;
 	unsigned int timestamp;
@@ -74,6 +77,9 @@ struct adreno_context {
 	unsigned int submitted_timestamp;
 	uint64_t submit_retire_ticks[SUBMIT_RETIRE_TICKS_SIZE];
 	int ticks_index;
+	/* qkx display slot: decaying-max GPU execution time, hold start */
+	u64 qkx_est_ns;
+	u64 qkx_held_since;
 
 	struct list_head active_node;
 	unsigned long active_time;

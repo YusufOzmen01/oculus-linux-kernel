@@ -1353,6 +1353,7 @@ static int kgsl_release(struct inode *inodep, struct file *filep)
 
 	/* Release the contexts for the file */
 	device_release_contexts(dev_priv);
+	kgsl_timeline_release_owner(dev_priv);
 
 	/* Close down the process wide resources for the file */
 	kgsl_process_private_close(dev_priv, dev_priv->process_priv);
@@ -1412,6 +1413,7 @@ static int kgsl_open(struct inode *inodep, struct file *filep)
 
 	dev_priv->device = device;
 	filep->private_data = dev_priv;
+	dev_priv->file = filep;
 
 	result = kgsl_open_device(device);
 	if (result)

@@ -595,7 +595,7 @@ last_request_on_engine(struct i915_timeline *timeline,
 	rq = i915_gem_active_raw(&timeline->last_request,
 				 &engine->i915->drm.struct_mutex);
 	if (rq && rq->engine == engine) {
-		GEM_TRACE("last request for %s on engine %s: %llx:%d\n",
+		GEM_TRACE("last request for %s on engine %s: %llx:%llu\n",
 			  timeline->name, engine->name,
 			  rq->fence.context, rq->fence.seqno);
 		GEM_BUG_ON(rq->timeline != timeline);
@@ -632,14 +632,14 @@ static bool engine_has_kernel_context_barrier(struct intel_engine_cs *engine)
 		 * switch-to-kernel-context?
 		 */
 		if (!i915_timeline_sync_is_later(barrier, &rq->fence)) {
-			GEM_TRACE("%s needs barrier for %llx:%d\n",
+			GEM_TRACE("%s needs barrier for %llx:%llu\n",
 				  ring->timeline->name,
 				  rq->fence.context,
 				  rq->fence.seqno);
 			return false;
 		}
 
-		GEM_TRACE("%s has barrier after %llx:%d\n",
+		GEM_TRACE("%s has barrier after %llx:%llu\n",
 			  ring->timeline->name,
 			  rq->fence.context,
 			  rq->fence.seqno);
@@ -695,7 +695,7 @@ int i915_gem_switch_to_kernel_context(struct drm_i915_private *i915)
 			if (prev->gem_context == i915->kernel_context)
 				continue;
 
-			GEM_TRACE("add barrier on %s for %llx:%d\n",
+			GEM_TRACE("add barrier on %s for %llx:%llu\n",
 				  engine->name,
 				  prev->fence.context,
 				  prev->fence.seqno);

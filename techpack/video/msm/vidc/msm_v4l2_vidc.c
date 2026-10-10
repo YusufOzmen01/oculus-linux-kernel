@@ -191,6 +191,54 @@ static int msm_v4l2_encoder_cmd(struct file *file, void *fh,
 	return msm_vidc_comm_cmd((void *)vidc_inst, (union msm_v4l2_cmd *)enc);
 }
 
+/*
+ * qkx: the vendor driver has no VIDIOC_TRY_FMT; ffmpeg's v4l2m2m and
+ * GStreamer's v4l2 elements probe formats with it and reject the device on
+ * ENOTTY. Accept any pixel format the queue enumerates and report the
+ * current plane layout without changing the session.
+ */
+static int msm_v4l2_try_fmt(struct file *file, void *fh,
+					struct v4l2_format *f)
+{
+	struct msm_vidc_inst *vidc_inst = get_vidc_inst(file, fh);
+	struct v4l2_pix_format_mplane *pix = &f->fmt.pix_mp;
+	struct v4l2_format cur;
+	struct v4l2_fmtdesc d;
+	bool found = false;
+	u32 i;
+
+	for (i = 0; i < 64; i++) {
+		memset(&d, 0, sizeof(d));
+		d.index = i;
+		d.type = f->type;
+		if (msm_vidc_enum_fmt((void *)vidc_inst, &d))
+			break;
+		if (d.pixelformat == pix->pixelformat) {
+			found = true;
+			break;
+		}
+	}
+	if (!found)
+		return -EINVAL;
+
+	pix->width = clamp_t(u32, pix->width, 16, 8192);
+	pix->height = clamp_t(u32, pix->height, 16, 8192);
+	if (pix->field == V4L2_FIELD_ANY)
+		pix->field = V4L2_FIELD_NONE;
+
+	memset(&cur, 0, sizeof(cur));
+	cur.type = f->type;
+	if (!msm_vidc_g_fmt((void *)vidc_inst, &cur) &&
+	    cur.fmt.pix_mp.num_planes) {
+		pix->num_planes = cur.fmt.pix_mp.num_planes;
+		for (i = 0; i < pix->num_planes && i < VIDEO_MAX_PLANES; i++)
+			pix->plane_fmt[i] = cur.fmt.pix_mp.plane_fmt[i];
+	} else if (!pix->num_planes) {
+		pix->num_planes = 1;
+	}
+	return 0;
+}
+
 static int msm_v4l2_enum_framesizes(struct file *file, void *fh,
 				struct v4l2_frmsizeenum *fsize)
 {
@@ -232,6 +280,8 @@ const struct v4l2_ioctl_ops msm_v4l2_ioctl_ops = {
 	.vidioc_s_fmt_vid_out_mplane = msm_v4l2_s_fmt,
 	.vidioc_g_fmt_vid_cap_mplane = msm_v4l2_g_fmt,
 	.vidioc_g_fmt_vid_out_mplane = msm_v4l2_g_fmt,
+	.vidioc_try_fmt_vid_cap_mplane = msm_v4l2_try_fmt,
+	.vidioc_try_fmt_vid_out_mplane = msm_v4l2_try_fmt,
 	.vidioc_reqbufs = msm_v4l2_reqbufs,
 	.vidioc_qbuf = msm_v4l2_qbuf,
 	.vidioc_dqbuf = msm_v4l2_dqbuf,

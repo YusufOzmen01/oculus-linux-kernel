@@ -52,6 +52,171 @@ unsigned int adreno_drawobj_timeout = 2000;
 /* Interval for reading and comparing fault detection registers */
 static unsigned int _fault_timer_interval = 200;
 
+/*
+ * qkx display slot. Without usable preemption a long job from any context
+ * delays the display (timewarp) pass past scanout. The display process
+ * tells us the latest time its next max-priority pass must start on the GPU;
+ * until that pass is submitted, other contexts may only start a job when the
+ * ringbuffer is empty (so "now" is the real GPU time) and the job is expected
+ * to finish margin_us before the deadline. Expected time is a per-context
+ * decaying max of measured GPU execution time.
+ */
+static unsigned int _qkx_slot_enable = 0; /* off: reprojected frames ghosted (2026-10-07) */
+static unsigned int _qkx_slot_margin_us = 1500;
+static unsigned int _qkx_slot_grace_us = 30000;
+static unsigned int _qkx_slot_starve_us = 50000;
+static unsigned int _qkx_slot_holds;
+/*
+ * vrcompositor renders the frames the display pass shows: while one of its
+ * jobs is held for lack of room, other held contexts may not take the gap.
+ */
+static unsigned int _qkx_slot_favor = 1;
+static bool qkx_favor_waiting;
+pid_t adreno_qkx_slot_owner = -1;
+static DEFINE_SPINLOCK(qkx_slot_lock);
+static u64 qkx_deadline_ns, qkx_window_ns, qkx_last_prot_ns;
+static u64 qkx_next_deadline_ns, qkx_next_window_ns;
+/*
+ * Jobs queued right behind the display pass cannot delay it (the ringbuffer
+ * is in order); qkx_behind_until estimates when the GPU gets to the next one.
+ */
+static u64 qkx_behind_until;
+static unsigned int _qkx_slot_pass_us = 4000;
+static struct hrtimer qkx_slot_timer;
+static struct kgsl_device *qkx_slot_device;
+
+#define QKX_EST_DEFAULT_NS 2000000ULL
+
+static enum hrtimer_restart qkx_slot_timer_fn(struct hrtimer *t)
+{
+	if (qkx_slot_device)
+		adreno_dispatcher_schedule(qkx_slot_device);
+	return HRTIMER_NORESTART;
+}
+
+static bool qkx_slot_hold(struct adreno_device *adreno_dev,
+		struct adreno_context *drawctxt)
+{
+	u64 now, est, deadline = 0, grace = _qkx_slot_grace_us * 1000ULL;
+	u64 last_prot;
+	unsigned long flags;
+	bool hold = false;
+
+	bool favored;
+
+	if (!_qkx_slot_enable ||
+		drawctxt->base.priority == KGSL_CONTEXT_PRIORITY_MAX)
+		return false;
+	favored = _qkx_slot_favor && drawctxt->base.proc_priv &&
+		!strncmp(drawctxt->base.proc_priv->comm, "vrcompositor", 12);
+
+	now = ktime_get_ns();
+	est = drawctxt->qkx_est_ns ? drawctxt->qkx_est_ns : QKX_EST_DEFAULT_NS;
+
+	spin_lock_irqsave(&qkx_slot_lock, flags);
+	if (qkx_deadline_ns && qkx_deadline_ns > qkx_window_ns &&
+		qkx_last_prot_ns < qkx_deadline_ns - qkx_window_ns &&
+		now < qkx_deadline_ns + grace) {
+		bool behind = now - qkx_last_prot_ns < _qkx_slot_pass_us * 1000ULL;
+		u64 start = behind ? max(now, qkx_behind_until) : now;
+
+		if ((!behind && adreno_dev->dispatcher.inflight) ||
+			start + est + _qkx_slot_margin_us * 1000ULL >
+				qkx_deadline_ns) {
+			hold = true;
+			deadline = qkx_deadline_ns;
+		} else if (behind)
+			qkx_behind_until = start + est;
+	}
+	if (!favored && qkx_favor_waiting && !hold) {
+		hold = true;
+		deadline = qkx_deadline_ns;
+	}
+	if (favored)
+		qkx_favor_waiting = hold;
+	last_prot = qkx_last_prot_ns;
+	spin_unlock_irqrestore(&qkx_slot_lock, flags);
+
+	if (hold) {
+		if (!drawctxt->qkx_held_since)
+			drawctxt->qkx_held_since = now;
+		else if (now - drawctxt->qkx_held_since >
+				_qkx_slot_starve_us * 1000ULL &&
+			 /*
+			  * A job too long to ever fit goes right behind a
+			  * display pass once it has starved for starve_us.
+			  */
+			 now - last_prot < _qkx_slot_pass_us * 1000ULL) {
+			hold = false;
+			if (favored)
+				qkx_favor_waiting = false;
+		}
+	}
+
+	if (hold) {
+		_qkx_slot_holds++;
+		hrtimer_start(&qkx_slot_timer, ns_to_ktime(deadline + grace),
+			HRTIMER_MODE_ABS);
+	} else
+		drawctxt->qkx_held_since = 0;
+
+	return hold;
+}
+
+static void qkx_slot_sent(struct adreno_context *drawctxt)
+{
+	unsigned long flags;
+
+	if (drawctxt->base.priority != KGSL_CONTEXT_PRIORITY_MAX)
+		return;
+	spin_lock_irqsave(&qkx_slot_lock, flags);
+	qkx_last_prot_ns = ktime_get_ns();
+	qkx_behind_until = qkx_last_prot_ns + _qkx_slot_pass_us * 1000ULL;
+	if (qkx_next_deadline_ns) {
+		qkx_deadline_ns = qkx_next_deadline_ns;
+		qkx_window_ns = qkx_next_window_ns;
+		qkx_next_deadline_ns = 0;
+	}
+	spin_unlock_irqrestore(&qkx_slot_lock, flags);
+}
+
+static void qkx_slot_retired(struct adreno_context *drawctxt,
+		uint64_t start, uint64_t end)
+{
+	u64 d, est = drawctxt->qkx_est_ns;
+
+	if (!start || end <= start)
+		return;
+	d = (end - start) * 10000 / 192;
+	if (d > 100000000ULL)
+		return;
+	drawctxt->qkx_est_ns = d >= est ? d : est - ((est - d) >> 4);
+}
+
+long kgsl_ioctl_qkx_display_slot(struct kgsl_device_private *dev_priv,
+		unsigned int cmd, void *data)
+{
+	struct kgsl_qkx_display_slot *param = data;
+	u64 window = param->window_ns & ~KGSL_QKX_SLOT_AFTER_SUBMIT;
+	unsigned long flags;
+
+	if (current->tgid != adreno_qkx_slot_owner)
+		return -EPERM;
+	if (window > 50000000ULL)
+		return -EINVAL;
+
+	spin_lock_irqsave(&qkx_slot_lock, flags);
+	if (param->window_ns & KGSL_QKX_SLOT_AFTER_SUBMIT) {
+		qkx_next_deadline_ns = param->deadline_ns;
+		qkx_next_window_ns = window;
+	} else {
+		qkx_deadline_ns = param->deadline_ns;
+		qkx_window_ns = window;
+	}
+	spin_unlock_irqrestore(&qkx_slot_lock, flags);
+	return 0;
+}
+
 #define DRAWQUEUE_RB(_drawqueue) \
 	((struct adreno_ringbuffer *) \
 		container_of((_drawqueue),\
@@ -789,6 +954,13 @@ static int dispatcher_context_sendcmds(struct adreno_device *adreno_dev,
 		if (adreno_gpu_fault(adreno_dev) != 0)
 			break;
 
+		/* Keep the display slot free; retried at the deadline */
+		if (qkx_slot_hold(adreno_dev, drawctxt)) {
+			if (!count)
+				ret = -EBUSY;
+			break;
+		}
+
 		spin_lock(&drawctxt->lock);
 		drawobj = _process_drawqueue_get_next_drawobj(drawctxt);
 
@@ -836,6 +1008,7 @@ static int dispatcher_context_sendcmds(struct adreno_device *adreno_dev,
 		}
 
 		drawctxt->submitted_timestamp = timestamp;
+		qkx_slot_sent(drawctxt);
 
 		count++;
 	}
@@ -2518,6 +2691,7 @@ static void retire_cmdobj(struct adreno_device *adreno_dev,
 
 	drawctxt->submit_retire_ticks[drawctxt->ticks_index] =
 		end - cmdobj->submit_ticks;
+	qkx_slot_retired(drawctxt, start, end);
 
 	drawctxt->ticks_index = (drawctxt->ticks_index + 1) %
 		SUBMIT_RETIRE_TICKS_SIZE;
@@ -2858,6 +3032,9 @@ void adreno_dispatcher_close(struct adreno_device *adreno_dev)
 	int i;
 	struct adreno_ringbuffer *rb;
 
+	hrtimer_cancel(&qkx_slot_timer);
+	qkx_slot_device = NULL;
+
 	mutex_lock(&dispatcher->mutex);
 	del_timer_sync(&dispatcher->timer);
 	del_timer_sync(&dispatcher->fault_timer);
@@ -2913,7 +3090,10 @@ static ssize_t _store_uint(struct adreno_dispatcher *dispatcher,
 	if (ret)
 		return ret;
 
-	if (!val || (attr->max && (val > attr->max)))
+	if ((!val && attr->value != &_qkx_slot_enable &&
+		attr->value != &_qkx_slot_holds &&
+		attr->value != &_qkx_slot_favor) ||
+		(attr->max && (val > attr->max)))
 		return -EINVAL;
 
 	*((unsigned int *) attr->value) = val;
@@ -2952,6 +3132,13 @@ static DISPATCHER_UINT_ATTR(fault_throttle_time, 0644, 0,
 	_fault_throttle_time);
 static DISPATCHER_UINT_ATTR(fault_throttle_burst, 0644, 0,
 	_fault_throttle_burst);
+static DISPATCHER_UINT_ATTR(qkx_slot, 0644, 1, _qkx_slot_enable);
+static DISPATCHER_UINT_ATTR(qkx_slot_grace_us, 0644, 0, _qkx_slot_grace_us);
+static DISPATCHER_UINT_ATTR(qkx_slot_margin_us, 0644, 0, _qkx_slot_margin_us);
+static DISPATCHER_UINT_ATTR(qkx_slot_favor, 0644, 1, _qkx_slot_favor);
+static DISPATCHER_UINT_ATTR(qkx_slot_pass_us, 0644, 0, _qkx_slot_pass_us);
+static DISPATCHER_UINT_ATTR(qkx_slot_starve_us, 0644, 0, _qkx_slot_starve_us);
+static DISPATCHER_UINT_ATTR(qkx_slot_holds, 0644, 0, _qkx_slot_holds);
 
 static struct attribute *dispatcher_attrs[] = {
 	&dispatcher_attr_inflight.attr,
@@ -2963,6 +3150,13 @@ static struct attribute *dispatcher_attrs[] = {
 	&dispatcher_attr_fault_detect_interval.attr,
 	&dispatcher_attr_fault_throttle_time.attr,
 	&dispatcher_attr_fault_throttle_burst.attr,
+	&dispatcher_attr_qkx_slot.attr,
+	&dispatcher_attr_qkx_slot_grace_us.attr,
+	&dispatcher_attr_qkx_slot_margin_us.attr,
+	&dispatcher_attr_qkx_slot_favor.attr,
+	&dispatcher_attr_qkx_slot_pass_us.attr,
+	&dispatcher_attr_qkx_slot_starve_us.attr,
+	&dispatcher_attr_qkx_slot_holds.attr,
 	NULL,
 };
 
@@ -3028,6 +3222,10 @@ int adreno_dispatcher_init(struct adreno_device *adreno_dev)
 	mutex_init(&dispatcher->mutex);
 
 	timer_setup(&dispatcher->timer, adreno_dispatcher_timer, 0);
+
+	hrtimer_init(&qkx_slot_timer, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
+	qkx_slot_timer.function = qkx_slot_timer_fn;
+	qkx_slot_device = device;
 
 	timer_setup(&dispatcher->fault_timer, adreno_dispatcher_fault_timer, 0);
 

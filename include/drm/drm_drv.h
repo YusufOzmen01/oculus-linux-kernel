@@ -58,6 +58,7 @@ struct drm_printer;
 #define DRIVER_KMS_LEGACY_CONTEXT	0x20000
 #define DRIVER_SYNCOBJ                  0x40000
 #define DRIVER_PREFER_XBGR_30BPP        0x80000
+#define DRIVER_SYNCOBJ_TIMELINE        0x100000
 
 /**
  * struct drm_driver - DRM driver structure

@@ -28,7 +28,11 @@ struct kgsl_timeline {
 	const char name[32];
 	/** @dev_priv: pointer to the owning device instance */
 	struct kgsl_device_private *dev_priv;
+	/* Protected by device->timelines_lock. */
+	u32 exported_files;
 };
+
+void kgsl_timeline_release_owner(struct kgsl_device_private *dev_priv);
 
 /**
  * kgsl_timeline_signal - Signal the timeline

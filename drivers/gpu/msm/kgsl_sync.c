@@ -65,7 +65,7 @@ static void kgsl_sync_fence_release(struct dma_fence *fence)
 	struct kgsl_sync_fence *kfence = (struct kgsl_sync_fence *)fence;
 
 	kgsl_sync_timeline_put(kfence->parent);
-	kfree(kfence);
+	dma_fence_free(fence);
 }
 
 /* Called with ktimeline->lock held */
@@ -820,7 +820,7 @@ static void kgsl_syncsource_fence_release(struct dma_fence *fence)
 	/* Release the refcount on the syncsource */
 	kgsl_syncsource_put(sfence->parent);
 
-	kfree(sfence);
+	dma_fence_free(fence);
 }
 
 void kgsl_syncsource_process_release_syncsources(

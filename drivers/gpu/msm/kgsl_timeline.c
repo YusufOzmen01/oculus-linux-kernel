@@ -5,6 +5,7 @@
  */
 
 #include <linux/dma-fence.h>
+#include <linux/anon_inodes.h>
 #include <linux/file.h>
 #include <linux/list.h>
 #include <linux/kref.h>
@@ -193,7 +194,7 @@ static bool timeline_fence_signaled(struct dma_fence *fence)
 {
 	struct kgsl_timeline_fence *f = to_timeline_fence(fence);
 
-	return !__dma_fence_is_later(fence->seqno, f->timeline->value);
+	return !__dma_fence_is_later(fence->seqno, f->timeline->value, fence->ops);
 }
 
 static bool timeline_fence_enable_signaling(struct dma_fence *fence)
@@ -511,20 +512,18 @@ long kgsl_ioctl_timeline_signal(struct kgsl_device_private *dev_priv,
 	return 0;
 }
 
-long kgsl_ioctl_timeline_destroy(struct kgsl_device_private *dev_priv,
-		unsigned int cmd, void *data)
+static long qkx_timeline_remove(struct kgsl_device *device,
+		struct kgsl_device_private *owner, u32 id)
 {
-	struct kgsl_device *device = dev_priv->device;
 	struct kgsl_timeline_fence *fence, *tmp;
 	struct kgsl_timeline *timeline;
 	struct list_head temp;
-	u32 *param = data;
 
-	if (*param == 0)
+	if (id == 0)
 		return -ENODEV;
 
 	spin_lock(&device->timelines_lock);
-	timeline = idr_find(&device->timelines, *param);
+	timeline = idr_find(&device->timelines, id);
 
 	if (timeline == NULL) {
 		spin_unlock(&device->timelines_lock);
@@ -535,9 +534,15 @@ long kgsl_ioctl_timeline_destroy(struct kgsl_device_private *dev_priv,
 	 * Validate that the id given is owned by the dev_priv
 	 * instance that is passed in. If not, abort.
 	 */
-	if (timeline->dev_priv != dev_priv) {
+	if (owner && timeline->dev_priv != owner) {
 		spin_unlock(&device->timelines_lock);
 		return -EINVAL;
+	}
+	if (timeline->exported_files) {
+		/* Keep ID and pending fences alive until the last opaque file closes. */
+		timeline->dev_priv = NULL;
+		spin_unlock(&device->timelines_lock);
+		return 0;
 	}
 
 	idr_remove(&device->timelines, timeline->id);
@@ -564,3 +569,11 @@ long kgsl_ioctl_timeline_destroy(struct kgsl_device_private *dev_priv,
 
 	return timeline ? 0 : -ENODEV;
 }
+
+long kgsl_ioctl_timeline_destroy(struct kgsl_device_private *dev_priv,
+		unsigned int cmd, void *data)
+{
+	return qkx_timeline_remove(dev_priv->device, dev_priv, *(u32 *)data);
+}
+
+#include "qkx_timeline_fd.h"

@@ -569,7 +569,33 @@ int msm_vidc_enum_framesizes(void *instance, struct v4l2_frmsizeenum *fsize)
 	if (!inst->core)
 		return -EINVAL;
 
+	/* qkx: one stepwise range; index > 0 ends the enumeration. */
+	if (fsize->index)
+		return -EINVAL;
+
 	capability = &inst->capability;
+	/*
+	 * The session capability is filled in only once the codec is set;
+	 * before that report the widest range of this session's domain.
+	 */
+	if (!capability->cap[CAP_FRAME_WIDTH].max) {
+		struct msm_vidc_core *core = inst->core;
+		u32 i;
+
+		for (i = 0; i < core->resources.codecs_count; i++) {
+			struct msm_vidc_capability *c = &core->capabilities[i];
+
+			if (c->domain != get_hal_domain(inst->session_type,
+							inst->sid))
+				continue;
+			if (c->cap[CAP_FRAME_WIDTH].max >
+			    capability->cap[CAP_FRAME_WIDTH].max)
+				capability = c;
+		}
+	}
+	if (!capability->cap[CAP_FRAME_WIDTH].max ||
+	    !capability->cap[CAP_FRAME_HEIGHT].max)
+		return -EINVAL;
 	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
 	fsize->stepwise.min_width = capability->cap[CAP_FRAME_WIDTH].min;
 	fsize->stepwise.max_width = capability->cap[CAP_FRAME_WIDTH].max;
@@ -579,6 +605,10 @@ int msm_vidc_enum_framesizes(void *instance, struct v4l2_frmsizeenum *fsize)
 	fsize->stepwise.max_height = capability->cap[CAP_FRAME_HEIGHT].max;
 	fsize->stepwise.step_height =
 		capability->cap[CAP_FRAME_HEIGHT].step_size;
+	if (!fsize->stepwise.step_width)
+		fsize->stepwise.step_width = 1;
+	if (!fsize->stepwise.step_height)
+		fsize->stepwise.step_height = 1;
 	return 0;
 }
 EXPORT_SYMBOL(msm_vidc_enum_framesizes);

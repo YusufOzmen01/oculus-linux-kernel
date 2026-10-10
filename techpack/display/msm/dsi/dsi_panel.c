@@ -4,6 +4,7 @@
  * Copyright (c) 2016-2019, 2021, The Linux Foundation. All rights reserved.
  */
 
+#include <linux/moduleparam.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
@@ -1029,9 +1030,16 @@ int dsi_panel_handle_dfps_pwm_fifo_local_dimming(struct dsi_panel *panel, u32 bl
 	if (!panel || !panel->cur_mode || !panel->cur_mode->timing.refresh_rate)
 		return -EINVAL;
 
-	/* Do not set refresh rate commands if called for changing backlight level request */
-	if (bl_level != panel->bl_config.bl_level)
+	/*
+	 * Only re-send the stride timing when the refresh rate changed, not for
+	 * every brightness update. QKX: one call is forced at startup, when the
+	 * stored level is invalid, because the panel may still hold timing left
+	 * by whatever ran before (e.g. the pre-kexec Android session).
+	 */
+	if (bl_level != panel->bl_config.bl_level &&
+	    !panel->bl_config.qkx_force_timing)
 		return rc;
+	panel->bl_config.qkx_force_timing = false;
 
 	bl_config = &panel->bl_config;
 	dsi = &panel->mipi_device;
@@ -1135,7 +1143,27 @@ int dsi_panel_handle_dfps_pwm_fifo_local_dimming(struct dsi_panel *panel, u32 bl
 	return rc;
 }
 
+/*
+ * QKX: the settling curve is indexed by pcb1_therm, a board sensor that reads
+ * well above the panel under SteamOS load, so the backlight can flash before
+ * the liquid crystal settles (faint trailing copies). Floor the settling time.
+ * 0 keeps stock behaviour; re-read by the temperature task every second.
+ */
+static unsigned int qkx_bl_settle_min_us;
+module_param(qkx_bl_settle_min_us, uint, 0644);
+MODULE_PARM_DESC(qkx_bl_settle_min_us, "Minimum LC settling time before backlight flash (us), 0 = curve only");
+
+static u32 dsi_panel_calculate_settling_time_curve(
+		struct dsi_backlight_config *bl_config, int temp);
+
 static u32 dsi_panel_calculate_settling_time(
+		struct dsi_backlight_config *bl_config, int temp)
+{
+	return max_t(u32, dsi_panel_calculate_settling_time_curve(bl_config, temp),
+		     qkx_bl_settle_min_us);
+}
+
+static u32 dsi_panel_calculate_settling_time_curve(
 		struct dsi_backlight_config *bl_config, int temp)
 {
 	const int *response_time = (int *)bl_config->response_time;
@@ -1272,6 +1300,18 @@ void dsi_panel_bl_handoff(struct dsi_panel *panel)
 	struct dsi_backlight_config *bl = &panel->bl_config;
 
 	bl->bl_level = dsi_panel_get_brightness(bl);
+
+	/*
+	 * QKX: get_brightness() reports a default, not the level the panel is
+	 * actually at. After a kexec boot the panel is still running the
+	 * previous session's settings, and the write in
+	 * dsi_panel_handle_dfps_pwm_fifo_local_dimming() is skipped whenever
+	 * the requested level matches that invented default. The panel then
+	 * keeps stale backlight/flash stride timing. Move the stored level out
+	 * of range once so the next set_backlight always programs the timing.
+	 */
+	bl->bl_level = U32_MAX;
+	bl->qkx_force_timing = true;
 }
 
 static int dsi_panel_pwm_register(struct dsi_panel *panel)

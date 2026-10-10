@@ -39,6 +39,18 @@ static int ovl_ccup_get(char *buf, const struct kernel_param *param)
 module_param_call(check_copy_up, ovl_ccup_set, ovl_ccup_get, NULL, 0644);
 MODULE_PARM_DESC(ovl_check_copy_up, "Obsolete; does nothing");
 
+/*
+ * Backport of upstream "ovl: skip copying unsupported xattrs": filesystem-
+ * specific attributes such as btrfs.compression cannot be stored on every
+ * upper filesystem. Only ACLs and security labels must be preserved.
+ */
+static bool ovl_must_copy_xattr(const char *name)
+{
+	return !strcmp(name, XATTR_NAME_POSIX_ACL_ACCESS) ||
+	       !strcmp(name, XATTR_NAME_POSIX_ACL_DEFAULT) ||
+	       !strncmp(name, XATTR_SECURITY_PREFIX, XATTR_SECURITY_PREFIX_LEN);
+}
+
 int ovl_copy_xattr(struct dentry *old, struct dentry *new)
 {
 	ssize_t list_size, size, value_size = 0;
@@ -111,8 +123,13 @@ retry:
 		}
 
 		error = vfs_setxattr(new, name, value, size, 0);
-		if (error)
-			break;
+		if (error) {
+			if (error != -EOPNOTSUPP || ovl_must_copy_xattr(name))
+				break;
+
+			/* Ignore failure to copy unknown xattrs */
+			error = 0;
+		}
 	}
 	kfree(value);
 out:

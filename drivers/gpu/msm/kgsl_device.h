@@ -527,6 +527,8 @@ enum kgsl_process_priv_flags {
 };
 
 struct kgsl_device_private {
+	/* Borrowed pointer; opaque timeline files take their own file reference. */
+	struct file *file;
 	struct kgsl_device *device;
 	struct kgsl_process_private *process_priv;
 };

@@ -412,6 +412,7 @@ adreno_drawctxt_create(struct kgsl_device_private *dev_priv,
 	    drawctxt->base.priority == KGSL_CONTEXT_PRIORITY_HIGH) {
 		/* Elevate this TID's context from high to max priority */
 		drawctxt->base.priority = KGSL_CONTEXT_PRIORITY_MAX;
+		adreno_qkx_slot_owner = current->tgid;
 	} else if (!_is_current_uid_privileged(&adreno_dev->dev) &&
 		   drawctxt->base.priority < KGSL_CONTEXT_PRIORITY_MED) {
 		/* Block out this UID's context from getting high+ priority */

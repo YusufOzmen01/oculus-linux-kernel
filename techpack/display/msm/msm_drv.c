@@ -1731,7 +1731,10 @@ static struct drm_driver msm_driver = {
 	.driver_features    = DRIVER_HAVE_IRQ |
 				DRIVER_GEM |
 				DRIVER_PRIME |
+				DRIVER_SYNCOBJ |
 				DRIVER_RENDER |
+				DRIVER_SYNCOBJ |
+				DRIVER_SYNCOBJ_TIMELINE |
 				DRIVER_ATOMIC |
 				DRIVER_MODESET,
 	.open               = msm_open,

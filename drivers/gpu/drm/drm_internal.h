@@ -184,6 +184,14 @@ int drm_syncobj_reset_ioctl(struct drm_device *dev, void *data,
 			    struct drm_file *file_private);
 int drm_syncobj_signal_ioctl(struct drm_device *dev, void *data,
 			     struct drm_file *file_private);
+int drm_syncobj_transfer_ioctl(struct drm_device *dev, void *data,
+			       struct drm_file *file_private);
+int drm_syncobj_timeline_wait_ioctl(struct drm_device *dev, void *data,
+				    struct drm_file *file_private);
+int drm_syncobj_timeline_signal_ioctl(struct drm_device *dev, void *data,
+				      struct drm_file *file_private);
+int drm_syncobj_query_ioctl(struct drm_device *dev, void *data,
+			    struct drm_file *file_private);
 
 /* drm_framebuffer.c */
 void drm_framebuffer_print_info(struct drm_printer *p, unsigned int indent,

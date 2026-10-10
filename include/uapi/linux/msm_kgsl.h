@@ -1721,6 +1721,16 @@ struct kgsl_gpu_sparse_command {
 #define IOCTL_KGSL_GPU_SPARSE_COMMAND \
 	_IOWR(KGSL_IOC_TYPE, 0x55, struct kgsl_gpu_sparse_command)
 
+/* QKX experimental lifetime-bearing opaque timeline descriptor. */
+struct kgsl_qkx_timeline_export {
+	__u32 timeline;
+	__s32 fd;
+};
+#define IOCTL_KGSL_QKX_TIMELINE_EXPORT \
+	_IOWR(KGSL_IOC_TYPE, 0x5e, struct kgsl_qkx_timeline_export)
+/* Called on the returned anonymous descriptor, not the KGSL device. */
+#define IOCTL_KGSL_QKX_TIMELINE_ID _IOR(KGSL_IOC_TYPE, 0x5f, __u32)
+
 #define KGSL_GPU_AUX_COMMAND_TIMELINE	(1 << 1)
 /* Reuse the same flag that GPU COMMAND uses */
 #define KGSL_GPU_AUX_COMMAND_SYNC	KGSL_CMDBATCH_SYNC
@@ -1939,5 +1949,23 @@ struct kgsl_allow_tid_maximum_priority {
 
 #define IOCTL_KGSL_ALLOW_TID_MAXIMUM_PRIORITY \
 	_IOW(KGSL_IOC_TYPE, 0xC1, struct kgsl_allow_tid_maximum_priority)
+
+/**
+ * struct kgsl_qkx_display_slot - Argument for IOCTL_KGSL_QKX_DISPLAY_SLOT
+ * @deadline_ns: CLOCK_MONOTONIC time by which the next max-priority display
+ * pass will be submitted; 0 disables the reservation
+ * @window_ns: a max-priority submission later than deadline_ns - window_ns
+ * satisfies the reservation; with KGSL_QKX_SLOT_AFTER_SUBMIT set, the
+ * reservation replaces the current one when the next max-priority submission
+ * is dispatched instead of immediately
+ */
+#define KGSL_QKX_SLOT_AFTER_SUBMIT (1ULL << 63)
+struct kgsl_qkx_display_slot {
+	__u64 deadline_ns;
+	__u64 window_ns;
+};
+
+#define IOCTL_KGSL_QKX_DISPLAY_SLOT \
+	_IOW(KGSL_IOC_TYPE, 0xC2, struct kgsl_qkx_display_slot)
 
 #endif /* _UAPI_MSM_KGSL_H */

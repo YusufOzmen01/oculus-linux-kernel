@@ -18,8 +18,8 @@ DECLARE_EVENT_CLASS(dma_fence,
 	TP_STRUCT__entry(
 		__string(driver, fence->ops->get_driver_name(fence))
 		__string(timeline, fence->ops->get_timeline_name(fence))
-		__field(unsigned int, context)
-		__field(unsigned int, seqno)
+		__field(u64, context)
+		__field(u64, seqno)
 	),
 
 	TP_fast_assign(
@@ -29,7 +29,7 @@ DECLARE_EVENT_CLASS(dma_fence,
 		__entry->seqno = fence->seqno;
 	),
 
-	TP_printk("driver=%s timeline=%s context=%u seqno=%u",
+	TP_printk("driver=%s timeline=%s context=%llu seqno=%llu",
 		  __get_str(driver), __get_str(timeline), __entry->context,
 		  __entry->seqno)
 );

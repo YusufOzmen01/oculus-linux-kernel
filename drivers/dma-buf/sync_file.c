@@ -24,6 +24,7 @@
 #include <linux/uaccess.h>
 #include <linux/anon_inodes.h>
 #include <linux/sync_file.h>
+#include <linux/dma-fence-unwrap.h>
 #include <uapi/linux/sync_file.h>
 
 static const struct file_operations sync_file_fops;
@@ -144,7 +145,7 @@ char *sync_file_get_name(struct sync_file *sync_file, char *buf, int len)
 	} else {
 		struct dma_fence *fence = sync_file->fence;
 
-		snprintf(buf, len, "%s-%s%llu-%d",
+		snprintf(buf, len, "%s-%s%llu-%llu",
 			 fence->ops->get_driver_name(fence),
 			 fence->ops->get_timeline_name(fence),
 			 fence->context,
@@ -154,32 +155,6 @@ char *sync_file_get_name(struct sync_file *sync_file, char *buf, int len)
 	return buf;
 }
 
-static int sync_file_set_fence(struct sync_file *sync_file,
-			       struct dma_fence **fences, int num_fences)
-{
-	struct dma_fence_array *array;
-
-	/*
-	 * The reference for the fences in the new sync_file and held
-	 * in add_fence() during the merge procedure, so for num_fences == 1
-	 * we already own a new reference to the fence. For num_fence > 1
-	 * we own the reference of the dma_fence_array creation.
-	 */
-	if (num_fences == 1) {
-		sync_file->fence = fences[0];
-		kfree(fences);
-	} else {
-		array = dma_fence_array_create(num_fences, fences,
-					       dma_fence_context_alloc(1),
-					       1, false);
-		if (!array)
-			return -ENOMEM;
-
-		sync_file->fence = &array->base;
-	}
-
-	return 0;
-}
 
 static struct dma_fence **get_fences(struct sync_file *sync_file,
 				     int *num_fences)
@@ -195,16 +170,6 @@ static struct dma_fence **get_fences(struct sync_file *sync_file,
 	return &sync_file->fence;
 }
 
-static void add_fence(struct dma_fence **fences,
-		      int *i, struct dma_fence *fence)
-{
-	fences[*i] = fence;
-
-	if (!dma_fence_is_signaled(fence)) {
-		dma_fence_get(fence);
-		(*i)++;
-	}
-}
 
 /**
  * sync_file_merge() - merge two sync_files
@@ -220,85 +185,24 @@ static struct sync_file *sync_file_merge(const char *name, struct sync_file *a,
 					 struct sync_file *b)
 {
 	struct sync_file *sync_file;
-	struct dma_fence **fences = NULL, **nfences, **a_fences, **b_fences;
-	int i = 0, i_a, i_b, num_fences, a_num_fences, b_num_fences;
 
 	sync_file = sync_file_alloc();
 	if (!sync_file)
 		return NULL;
 
-	a_fences = get_fences(a, &a_num_fences);
-	b_fences = get_fences(b, &b_num_fences);
-	if (a_num_fences > INT_MAX - b_num_fences)
-		goto err;
-
-	num_fences = a_num_fences + b_num_fences;
-
-	fences = kcalloc(num_fences, sizeof(*fences), GFP_KERNEL);
-	if (!fences)
-		goto err;
-
 	/*
-	 * Assume sync_file a and b are both ordered and have no
-	 * duplicates with the same context.
-	 *
-	 * If a sync_file can only be created with sync_file_merge
-	 * and sync_file_create, this is a reasonable assumption.
+	 * A DRM timeline point can contain an array of GPU dependencies.
+	 * Unwrap it before merging so repeated empty submissions cannot build
+	 * nested array/chain callback-registration stacks.
 	 */
-	for (i_a = i_b = 0; i_a < a_num_fences && i_b < b_num_fences; ) {
-		struct dma_fence *pt_a = a_fences[i_a];
-		struct dma_fence *pt_b = b_fences[i_b];
-
-		if (pt_a->context < pt_b->context) {
-			add_fence(fences, &i, pt_a);
-
-			i_a++;
-		} else if (pt_a->context > pt_b->context) {
-			add_fence(fences, &i, pt_b);
-
-			i_b++;
-		} else {
-			if (pt_a->seqno - pt_b->seqno <= INT_MAX)
-				add_fence(fences, &i, pt_a);
-			else
-				add_fence(fences, &i, pt_b);
-
-			i_a++;
-			i_b++;
-		}
+	sync_file->fence = dma_fence_unwrap_merge(a->fence, b->fence);
+	if (!sync_file->fence) {
+		fput(sync_file->file);
+		return NULL;
 	}
-
-	for (; i_a < a_num_fences; i_a++)
-		add_fence(fences, &i, a_fences[i_a]);
-
-	for (; i_b < b_num_fences; i_b++)
-		add_fence(fences, &i, b_fences[i_b]);
-
-	if (i == 0)
-		fences[i++] = dma_fence_get(a_fences[0]);
-
-	if (num_fences > i) {
-		nfences = krealloc(fences, i * sizeof(*fences),
-				  GFP_KERNEL);
-		if (!nfences)
-			goto err;
-
-		fences = nfences;
-	}
-
-	if (sync_file_set_fence(sync_file, fences, i) < 0)
-		goto err;
 
 	strlcpy(sync_file->user_name, name, sizeof(sync_file->user_name));
 	return sync_file;
-
-err:
-	while (i)
-		dma_fence_put(fences[--i]);
-	kfree(fences);
-	fput(sync_file->file);
-	return NULL;
-
 }
 
 static int sync_file_release(struct inode *inode, struct file *file)

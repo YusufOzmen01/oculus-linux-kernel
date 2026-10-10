@@ -108,6 +108,10 @@ static inline int __i915_timeline_sync_set(struct i915_timeline *tl,
 static inline int i915_timeline_sync_set(struct i915_timeline *tl,
 					 const struct dma_fence *fence)
 {
+	/* The syncmap stores wrapping 32-bit seqnos, not timeline points. */
+	if (fence->ops->use_64bit_seqno)
+		return 0;
+
 	return __i915_timeline_sync_set(tl, fence->context, fence->seqno);
 }
 
@@ -120,6 +124,9 @@ static inline bool __i915_timeline_sync_is_later(struct i915_timeline *tl,
 static inline bool i915_timeline_sync_is_later(struct i915_timeline *tl,
 					       const struct dma_fence *fence)
 {
+	if (fence->ops->use_64bit_seqno)
+		return false;
+
 	return __i915_timeline_sync_is_later(tl, fence->context, fence->seqno);
 }
 

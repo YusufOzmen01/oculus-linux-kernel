@@ -162,6 +162,10 @@ struct dsi_backlight_config {
 	u32 *response_time;
 	int num_response_time_entries;
 	u32 settling_time_target_us;
+
+	/* QKX: send the panel's backlight stride timing on the next update even
+	 * if the level is unchanged (panel state may predate this boot). */
+	bool qkx_force_timing;
 };
 
 struct dsi_reset_seq {

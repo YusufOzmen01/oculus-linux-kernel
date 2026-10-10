@@ -2094,7 +2094,7 @@ static int _sde_kms_remove_fbs(struct sde_kms *sde_kms, struct drm_file *file,
 
 	if (list_empty(&fbs)) {
 		SDE_DEBUG("skip commit as no fb(s)\n");
-		drm_atomic_state_put(state);
+		/* sde_kms_preclose owns and releases this state. */
 		return 0;
 	}
 
